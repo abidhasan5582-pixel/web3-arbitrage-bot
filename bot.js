@@ -430,6 +430,14 @@ bot.catch((err) => {
 });
 
 async function startBot() {
+  console.log('=== Starting bot ===');
+  console.log('Node version:', process.version);
+  console.log('Platform:', process.platform);
+  console.log('PORT:', process.env.PORT || '3000');
+  console.log('Chat ID configured:', config.telegramChatId ? 'YES' : 'NO');
+  console.log('Odds API:', config.oddsApiKey ? 'SET' : 'MISSING');
+  console.log('Bankroll: $' + config.bankroll);
+
   const missing = config.validate();
   if (missing.length > 0) {
     console.warn(`Missing env vars for Telegram bot: ${missing.join(', ')}`);
@@ -449,6 +457,7 @@ async function startBot() {
   const savedAlerts = db.getSetting('alerts_enabled');
   if (savedAlerts === 'false') config.alertsEnabled = false;
 
+  console.log('Launching Telegram bot...');
   await bot.launch();
   console.log('Bot started successfully');
   console.log(`Bankroll: $${config.bankroll}`);
