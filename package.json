@@ -7,12 +7,13 @@
     "start": "node bot.js",
     "dev": "node --watch bot.js",
     "precommit": "node .opencode/hooks/pre-commit.js",
+    "prepush": "node .opencode/hooks/pre-push.js",
     "syntax-check": "node -c bot.js && node -c arbitrage.js && node -c oddsFetcher.js && node -c database.js && node -c aiAnalyzer.js && node -c config.js && node -c tui.js",
     "test": "node --test test/*.test.js"
   },
   "dependencies": {
-    "blessed": "^0.1.81",
-    "dotenv": "^16.4.7",
+    "blessed": "0.1.81",
+    "dotenv": "16.4.7",
     "sql.js": "1.14.1",
     "telegraf": "4.16.3"
   },

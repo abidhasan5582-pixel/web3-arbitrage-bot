@@ -13,11 +13,21 @@ describe('config validation', () => {
   });
 
   it('validate returns missing keys when empty', () => {
+    const saved = {};
+    const keys = ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'ODDS_API_KEY'];
+    for (const key of keys) {
+      saved[key] = process.env[key];
+      process.env[key] = '';
+    }
+    delete require.cache[require.resolve('../config')];
     const config = require('../config');
     const missing = config.validate();
     assert.ok(Array.isArray(missing));
     assert.ok(missing.includes('TELEGRAM_BOT_TOKEN'));
     assert.ok(missing.includes('TELEGRAM_CHAT_ID'));
+    for (const key of keys) {
+      process.env[key] = saved[key];
+    }
   });
 });
 

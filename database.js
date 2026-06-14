@@ -64,6 +64,19 @@ async function initDatabase() {
     )
   `);
 
+  try { db.run('ALTER TABLE bets ADD COLUMN is_demo INTEGER DEFAULT 0'); } catch (_) {}
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS demo_stats (
+      date TEXT PRIMARY KEY,
+      profit REAL DEFAULT 0,
+      trades INTEGER DEFAULT 0,
+      wins INTEGER DEFAULT 0,
+      losses INTEGER DEFAULT 0,
+      best_roi REAL DEFAULT 0
+    )
+  `);
+
   db.run(`
     CREATE TABLE IF NOT EXISTS daily_stats (
       date TEXT PRIMARY KEY,
@@ -152,8 +165,8 @@ module.exports = {
   },
 
   logBet(bet) {
-    runSql(`INSERT INTO bets (event, sport, platform_a, odds_a, stake_a, platform_b, odds_b, stake_b, total_staked, guaranteed_return, profit, roi, status)
-      VALUES ($event, $sport, $platformA, $oddsA, $stakeA, $platformB, $oddsB, $stakeB, $totalStaked, $guaranteedReturn, $profit, $roi, $status)`, {
+    runSql(`INSERT INTO bets (event, sport, platform_a, odds_a, stake_a, platform_b, odds_b, stake_b, total_staked, guaranteed_return, profit, roi, status, is_demo)
+      VALUES ($event, $sport, $platformA, $oddsA, $stakeA, $platformB, $oddsB, $stakeB, $totalStaked, $guaranteedReturn, $profit, $roi, $status, $isDemo)`, {
       $event: bet.event,
       $sport: bet.sport || '',
       $platformA: bet.platformA,
@@ -166,12 +179,16 @@ module.exports = {
       $guaranteedReturn: bet.guaranteedReturn,
       $profit: bet.profit,
       $roi: bet.roi,
-      $status: bet.status || 'pending',
+      $status: bet.status || 'settled',
+      $isDemo: bet.isDemo ? 1 : 0,
     });
   },
 
-  getRecentBets(limit = 20) {
-    return queryAll('SELECT * FROM bets ORDER BY created_at DESC LIMIT $limit', { $limit: limit });
+  getRecentBets(limit = 20, isDemo) {
+    const sql = isDemo !== undefined
+      ? `SELECT * FROM bets WHERE is_demo = ${isDemo ? 1 : 0} ORDER BY created_at DESC LIMIT $limit`
+      : 'SELECT * FROM bets ORDER BY created_at DESC LIMIT $limit';
+    return queryAll(sql, { $limit: limit });
   },
 
   getBetsByDate(date) {
@@ -234,6 +251,57 @@ module.exports = {
 
   getRecentDailyStats(days = 7) {
     return queryAll('SELECT * FROM daily_stats ORDER BY date DESC LIMIT $days', { $days: days });
+  },
+
+  logDemoTrade(trade) {
+    runSql(`INSERT INTO bets (event, sport, platform_a, odds_a, stake_a, platform_b, odds_b, stake_b, total_staked, guaranteed_return, profit, roi, status, is_demo)
+      VALUES ($event, $sport, $platformA, $oddsA, $stakeA, $platformB, $oddsB, $stakeB, $totalStaked, $guaranteedReturn, $profit, $roi, 'settled', 1)`, {
+      $event: trade.event,
+      $sport: trade.sport || '',
+      $platformA: trade.platformA,
+      $oddsA: trade.oddsA,
+      $stakeA: trade.stakeA,
+      $platformB: trade.platformB,
+      $oddsB: trade.oddsB,
+      $stakeB: trade.stakeB,
+      $totalStaked: trade.stakeA + trade.stakeB,
+      $guaranteedReturn: trade.guaranteedReturn,
+      $profit: trade.profit,
+      $roi: trade.roi,
+    });
+  },
+
+  getDemoSummary() {
+    const rows = queryAll(`SELECT COUNT(*) as count, COALESCE(SUM(profit), 0) as total_profit, COALESCE(SUM(total_staked), 0) as total_staked, COALESCE(AVG(roi), 0) as avg_roi FROM bets WHERE is_demo = 1`);
+    const today = queryAll(`SELECT COALESCE(SUM(profit), 0) as today_profit, COUNT(*) as today_trades FROM bets WHERE is_demo = 1 AND date(created_at) = date('now')`);
+    return { ...rows[0], ...today[0] };
+  },
+
+  updateDemoStats(date, stats) {
+    runSql(`INSERT INTO demo_stats (date, profit, trades, wins, losses, best_roi)
+      VALUES ($date, $profit, $trades, $wins, $losses, $bestRoi)
+      ON CONFLICT(date) DO UPDATE SET
+        profit = profit + $profit2,
+        trades = trades + $trades2,
+        wins = wins + $wins2,
+        losses = losses + $losses2,
+        best_roi = MAX(best_roi, $bestRoi2)`, {
+      $date: date,
+      $profit: stats.profit || 0,
+      $trades: stats.trades || 0,
+      $wins: stats.wins || 0,
+      $losses: stats.losses || 0,
+      $bestRoi: stats.bestRoi || 0,
+      $profit2: stats.profit || 0,
+      $trades2: stats.trades || 0,
+      $wins2: stats.wins || 0,
+      $losses2: stats.losses || 0,
+      $bestRoi2: stats.bestRoi || 0,
+    });
+  },
+
+  getRecentDemoStats(days = 7) {
+    return queryAll('SELECT * FROM demo_stats ORDER BY date DESC LIMIT $days', { $days: days });
   },
 
   close() {

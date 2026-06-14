@@ -83,10 +83,47 @@ async function performScan(ctx, sportFilter) {
       db.saveOpportunity(arb);
     }
 
+    let demoExecuted = 0;
+    let demoProfitTotal = 0;
+    if (config.demoMode && arbs.length > 0) {
+      const executable = arbs.filter(a => a.riskLevel !== 'high' && a.roi >= config.minArbROI * 100);
+      for (const arb of executable) {
+        if (Math.random() > config.demoExecutionRate) continue;
+        const demoBankroll = config.bankroll;
+        const stake = demoBankroll * config.maxBetPercent;
+        const arbProfit = (stake * arb.roi) / 100;
+        db.logDemoTrade({
+          event: arb.event,
+          sport: arb.sport,
+          platformA: arb.platformA,
+          oddsA: arb.oddsA,
+          stakeA: arb.stakeA || (stake / 2),
+          platformB: arb.platformB,
+          oddsB: arb.oddsB,
+          stakeB: arb.stakeB || (stake / 2),
+          guaranteedReturn: stake + arbProfit,
+          profit: arbProfit,
+          roi: arb.roi,
+        });
+        demoExecuted++;
+        demoProfitTotal += arbProfit;
+      }
+      if (demoExecuted > 0) {
+        db.updateDemoStats(today, {
+          profit: demoProfitTotal,
+          trades: demoExecuted,
+          wins: demoProfitTotal > 0 ? demoExecuted : 0,
+          losses: demoProfitTotal <= 0 ? demoExecuted : 0,
+          bestRoi: Math.max(...arbs.map(a => a.roi)),
+        });
+        console.log(`[Demo] Executed ${demoExecuted} trades, P&L: $${demoProfitTotal.toFixed(2)}`);
+      }
+    }
+
     const today = new Date().toISOString().split('T')[0];
     db.updateDailyStats(today, {
       arbsFound: arbs.length,
-      arbsExecuted: 0,
+      arbsExecuted: demoExecuted,
       bestRoi: arbs.length > 0 ? Math.max(...arbs.map(a => a.roi)) : 0,
     });
 
@@ -94,6 +131,9 @@ async function performScan(ctx, sportFilter) {
       if (arbs.length === 0) {
         await ctx.reply('✅ Scan complete. No arbitrage opportunities found this round.');
       } else {
+        if (config.demoMode && demoExecuted > 0) {
+          await ctx.reply(`🎮 *Demo: ${demoExecuted} trades executed!*\nEstimated P&L: $${demoProfitTotal.toFixed(2)}`, { parse_mode: 'Markdown' });
+        }
         let msg = `🎯 *Found ${arbs.length} arbitrage opportunities!*\n\n`;
         const topArbs = arbs.slice(0, 5);
         topArbs.forEach((arb, i) => {
@@ -119,6 +159,12 @@ async function performScan(ctx, sportFilter) {
         await bot.telegram.sendMessage(config.telegramChatId, alertMsg, { parse_mode: 'Markdown' });
       } catch (err) {
         console.error('Alert send failed:', err.message);
+      }
+
+      if (config.demoMode && demoExecuted > 0) {
+        try {
+          await bot.telegram.sendMessage(config.telegramChatId, `🎮 *Demo: ${demoExecuted} trades executed*\nP&L: $${demoProfitTotal.toFixed(2)}`, { parse_mode: 'Markdown' });
+        } catch (_) {}
       }
     }
 
@@ -150,6 +196,8 @@ bot.start(async (ctx) => {
     `• /calculate 2.15 2.20 — Calculate arb\n` +
     `• /strategy — AI daily strategy\n` +
     `• /auto on — Start auto-scanning\n` +
+    `• /demo — Demo trading mode & P&L\n` +
+    `• /trades — View recent demo trades\n` +
     `• /help — All commands\n\n` +
     `*Your bankroll:* $${config.bankroll.toFixed(2)}`;
 
@@ -176,7 +224,12 @@ bot.help(async (ctx) => {
     `/alerts on/off — Toggle notifications\n` +
     `/settings — Show current config\n` +
     `/platforms — Supported platforms\n` +
-    `/status — Bot uptime & stats`;
+    `/status — Bot uptime & stats\n\n` +
+    `*Demo Trading*\n` +
+    `/demo — Show demo status & P&L\n` +
+    `/demo on/off — Toggle demo mode\n` +
+    `/demo rate 0.3 — Set execution rate\n` +
+    `/trades — View recent demo trades`;
 
   await ctx.reply(helpMsg, { parse_mode: 'Markdown' });
 });
@@ -349,7 +402,9 @@ bot.command('settings', async (ctx) => {
     `Scan Interval: ${config.scanInterval / 1000}s\n` +
     `Max Bet: ${config.maxBetPercent * 100}% of bankroll\n` +
     `Alerts: ${config.alertsEnabled ? 'ON' : 'OFF'}\n` +
-    `Auto-Scan: ${autoScanTimer ? 'RUNNING' : 'STOPPED'}`,
+    `Auto-Scan: ${autoScanTimer ? 'RUNNING' : 'STOPPED'}\n` +
+    `Demo Mode: ${config.demoMode ? 'ON' : 'OFF'}\n` +
+    `Demo Rate: ${(config.demoExecutionRate * 100).toFixed(0)}%`,
     { parse_mode: 'Markdown' }
   );
 });
@@ -391,6 +446,7 @@ bot.command('status', async (ctx) => {
 
   const recentArbs = db.getRecentArbs(1);
   const bets = db.getRecentBets(1);
+  const demoSummary = db.getDemoSummary();
 
   await ctx.reply(
     `📡 *Bot Status*\n\n` +
@@ -399,9 +455,74 @@ bot.command('status', async (ctx) => {
     `🎯 Latest Arb: ${recentArbs.length > 0 ? `${recentArbs[0].roi}% ROI` : 'None yet'}\n` +
     `📝 Total Bets Logged: ${bets.length > 0 ? bets[0].id : 0}\n` +
     `🔔 Alerts: ${config.alertsEnabled ? 'ON' : 'OFF'}\n` +
-    `🔄 Auto-Scan: ${autoScanTimer ? 'RUNNING' : 'STOPPED'}`,
+    `🔄 Auto-Scan: ${autoScanTimer ? 'RUNNING' : 'STOPPED'}\n` +
+    `🎮 Demo Mode: ${config.demoMode ? 'ON' : 'OFF'}\n` +
+    `📊 Demo Trades: ${demoSummary.count || 0} | P&L: $${(demoSummary.total_profit || 0).toFixed(2)}`,
     { parse_mode: 'Markdown' }
   );
+});
+
+bot.command('demo', async (ctx) => {
+  const args = ctx.message.text.split(' ').slice(1);
+  const sub = args[0]?.toLowerCase();
+
+  if (sub === 'on') {
+    config.demoMode = true;
+    db.saveSetting('demo_mode', 'true');
+    await ctx.reply('🟢 Demo mode enabled. Arbs will be auto-executed as demo trades.');
+    return;
+  }
+  if (sub === 'off') {
+    config.demoMode = false;
+    db.saveSetting('demo_mode', 'false');
+    await ctx.reply('🔴 Demo mode disabled.');
+    return;
+  }
+  if (sub === 'rate' && args[1]) {
+    const rate = parseFloat(args[1]);
+    if (isNaN(rate) || rate < 0 || rate > 1) {
+      await ctx.reply('Rate must be between 0 and 1. Example: /demo rate 0.3');
+      return;
+    }
+    config.demoExecutionRate = rate;
+    db.saveSetting('demo_execution_rate', String(rate));
+    await ctx.reply(`📊 Demo execution rate set to ${(rate * 100).toFixed(0)}%`);
+    return;
+  }
+
+  const summary = db.getDemoSummary();
+  const msg =
+    `🎮 *Demo Trading*\n\n` +
+    `Status: ${config.demoMode ? '🟢 ON' : '🔴 OFF'}\n` +
+    `Execution Rate: ${(config.demoExecutionRate * 100).toFixed(0)}%\n` +
+    `Bankroll: $${config.bankroll.toFixed(2)}\n` +
+    `Total Trades: ${summary.count || 0}\n` +
+    `Total Staked: $${(summary.total_staked || 0).toFixed(2)}\n` +
+    `Total P&L: $${(summary.total_profit || 0).toFixed(2)}\n` +
+    `Avg ROI: ${(summary.avg_roi || 0).toFixed(2)}%\n` +
+    `Today: ${summary.today_trades || 0} trades | $${(summary.today_profit || 0).toFixed(2)}\n\n` +
+    `*Commands:*\n` +
+    `• /demo on/off — Toggle\n` +
+    `• /demo rate 0.3 — Set execution rate\n` +
+    `• /trades — View recent demo trades`;
+
+  await ctx.reply(msg, { parse_mode: 'Markdown' });
+});
+
+bot.command('trades', async (ctx) => {
+  const trades = db.getRecentBets(10, true);
+  if (trades.length === 0) {
+    await ctx.reply('No demo trades yet. Enable demo mode with /demo on and run /scan.');
+    return;
+  }
+
+  let msg = `📋 *Recent Demo Trades*\n\n`;
+  trades.forEach((t, i) => {
+    msg += `${i + 1}. ${t.event}\n`;
+    msg += `   ${t.platform_a} @ ${t.odds_a} | ${t.platform_b} @ ${t.odds_b}\n`;
+    msg += `   Staked: $${t.total_staked.toFixed(2)} → Profit: $${t.profit.toFixed(2)} (${t.roi.toFixed(2)}%)\n\n`;
+  });
+  await ctx.reply(truncateMsg(msg), { parse_mode: 'Markdown' });
 });
 
 // Health check endpoint for Railway
@@ -456,6 +577,13 @@ async function startBot() {
 
   const savedAlerts = db.getSetting('alerts_enabled');
   if (savedAlerts === 'false') config.alertsEnabled = false;
+
+  const savedDemoMode = db.getSetting('demo_mode');
+  if (savedDemoMode === 'false') config.demoMode = false;
+  if (savedDemoMode === 'true') config.demoMode = true;
+
+  const savedDemoRate = db.getSetting('demo_execution_rate');
+  if (savedDemoRate) config.demoExecutionRate = parseFloat(savedDemoRate);
 
   console.log('Launching Telegram bot...');
   await bot.launch();

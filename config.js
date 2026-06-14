@@ -8,6 +8,9 @@ const config = {
   puterApiKey: process.env.PUTER_API_KEY || '',
 
   bankroll: parseFloat(process.env.BANKROLL) || 20,
+  demoMode: process.env.DEMO_MODE !== 'false',
+  demoExecutionRate: parseFloat(process.env.DEMO_EXECUTION_RATE) || 0.3,
+  demoBankroll: parseFloat(process.env.DEMO_BANKROLL) || 20,
   minArbROI: (parseFloat(process.env.MIN_ARB_ROI) || 2) / 100,
   maxArbROI: (parseFloat(process.env.MAX_ARB_ROI) || 10) / 100,
   scanInterval: (parseInt(process.env.SCAN_INTERVAL) || 60) * 1000,
