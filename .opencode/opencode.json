@@ -1,0 +1,53 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [
+    ".opencode/rules/security.md",
+    ".opencode/rules/testing.md",
+    ".opencode/rules/risk.md",
+    ".opencode/rules/coding-style.md"
+  ],
+
+  "agent": {
+    "arb-scanner": {
+      "description": "Develops and maintains the Web3 Sports Betting Arbitrage Telegram Bot. Use for building scanner features, fixing arb math bugs, running syntax checks, and deploying to Railway.",
+      "mode": "subagent",
+      "model": "anthropic/claude-sonnet-4-6",
+      "permission": {
+        "edit": "allow",
+        "bash": { "npm *": "allow", "node *": "allow", "git *": "allow", "*": "ask" },
+        "read": "allow",
+        "glob": "allow",
+        "grep": "allow"
+      }
+    }
+  },
+
+  "command": {
+    "syntax-check": { "description": "Run syntax check on all JS files", "prompt": "Run 'node -c bot.js && node -c arbitrage.js && node -c oddsFetcher.js && node -c database.js && node -c aiAnalyzer.js && node -c config.js'" },
+    "deploy-check": { "description": "Verify project is ready for Railway deployment", "prompt": "1) Check .env.example has all env vars from config.js 2) Run syntax check on all JS files 3) Check package.json has telegraf and sql.js 4) Verify Procfile and railway.json exist" },
+    "add-sport": { "description": "Add a new sport to the odds scanner", "prompt": "1) Add sport key/name to SPORTS array in oddsFetcher.js 2) Verify the sport key matches OddsPapi format 3) Run syntax check" },
+    "generate-report": { "description": "Generate daily/weekly performance report from database", "prompt": "Read the recent bets from database.js, calculate P&L, and format a report" }
+  },
+
+  "mcp": {
+    "railway": {
+      "type": "local",
+      "command": ["npx", "-y", "@railway/mcp-server"],
+      "enabled": false
+    },
+    "github": {
+      "type": "remote",
+      "url": "https://api.github.com/mcp",
+      "enabled": false
+    }
+  },
+
+  "permission": {
+    "edit": "allow",
+    "bash": { "npm *": "allow", "node *": "allow", "git *": "allow", "npx *": "allow", "*": "ask" },
+    "external_directory": {
+      "C:\\Users\\PC\\.local\\share\\opencode\\tmp\\**": "allow",
+      "*": "ask"
+    }
+  }
+}
