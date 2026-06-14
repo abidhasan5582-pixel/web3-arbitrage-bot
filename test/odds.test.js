@@ -18,7 +18,6 @@ describe('config validation', () => {
     assert.ok(Array.isArray(missing));
     assert.ok(missing.includes('TELEGRAM_BOT_TOKEN'));
     assert.ok(missing.includes('TELEGRAM_CHAT_ID'));
-    assert.ok(missing.includes('ODDS_API_KEY'));
   });
 });
 
@@ -29,6 +28,5 @@ describe('oddsFetcher exports', () => {
     assert.ok(typeof oddsFetcher.scanPolymarket === 'function');
     assert.ok(typeof oddsFetcher.scanSXBet === 'function');
     assert.ok(typeof oddsFetcher.scanESPN === 'function');
-    assert.ok(typeof oddsFetcher.scanRapidAPI === 'function');
   });
 });

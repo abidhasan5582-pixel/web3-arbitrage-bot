@@ -6,7 +6,7 @@ const config = {
   oddsApiKey: process.env.ODDS_API_KEY || '',
   openaiApiKey: process.env.OPENAI_API_KEY || '',
   puterApiKey: process.env.PUTER_API_KEY || '',
-  rapidapiKey: process.env.RAPIDAPI_KEY || '',
+
   bankroll: parseFloat(process.env.BANKROLL) || 20,
   minArbROI: (parseFloat(process.env.MIN_ARB_ROI) || 2) / 100,
   maxArbROI: (parseFloat(process.env.MAX_ARB_ROI) || 10) / 100,

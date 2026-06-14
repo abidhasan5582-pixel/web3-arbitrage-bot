@@ -264,81 +264,15 @@ async function scanESPN() {
   return results;
 }
 
-async function scanRapidAPI() {
-  const apiKey = config.rapidapiKey;
-  if (!apiKey) return [];
-
-  const results = [];
-  const headers = {
-    'x-rapidapi-key': apiKey,
-    'x-rapidapi-host': 'api-football-v1.p.rapidapi.com',
-  };
-
-  const leagues = [
-    { id: 39, name: 'EPL' },
-    { id: 140, name: 'La Liga' },
-    { id: 135, name: 'Serie A' },
-    { id: 78, name: 'Bundesliga' },
-    { id: 61, name: 'Ligue 1' },
-  ];
-
-  for (const league of leagues) {
-    try {
-      const url = `https://api-football-v1.p.rapidapi.com/v3/odds?league=${league.id}&season=2025&bookmaker=8&page=1`;
-      const res = await fetchWithTimeout(url, { headers });
-      if (!res.ok) { console.error(`[RapidAPI] ${league.name}: ${res.status}`); continue; }
-
-      const data = await res.json();
-      const oddsList = Array.isArray(data?.response) ? data.response : [];
-
-      for (const item of oddsList) {
-        const fixture = item.fixture;
-        const teams = item.teams;
-        if (!fixture || !teams) continue;
-        const bookmakers = item.bookmakers?.[0];
-        if (!bookmakers) continue;
-        const bets = bookmakers.bets?.[0];
-        if (!bets?.values) continue;
-
-        const homeVal = bets.values.find(v => v.value === 'Home');
-        const awayVal = bets.values.find(v => v.value === 'Away');
-        if (!homeVal || !awayVal) continue;
-
-        const homeDec = parseFloat(homeVal.odd);
-        const awayDec = parseFloat(awayVal.odd);
-        if (!homeDec || !awayDec || homeDec <= 1 || awayDec <= 1) continue;
-
-        results.push({
-          event: `${teams.home.name} vs ${teams.away.name}`,
-          sport: league.name,
-          home: teams.home.name,
-          away: teams.away.name,
-          platformA: `RapidAPI (${bookmakers.name})`,
-          oddsA: homeDec,
-          platformB: `RapidAPI (${bookmakers.name})`,
-          oddsB: awayDec,
-          source: 'rapidapi',
-          commenceTime: fixture.date,
-        });
-      }
-    } catch (err) {
-      console.error(`[RapidAPI] ${league.name}: ${err.message}`, err.stack?.split('\n')[1]);
-    }
-  }
-
-  return results;
-}
-
 async function scanAll() {
-  const [sportsOdds, espnOdds, rapidOdds, polymarketOdds, sxbetOdds] = await Promise.all([
+  const [sportsOdds, espnOdds, polymarketOdds, sxbetOdds] = await Promise.all([
     scanAllSports(),
     scanESPN(),
-    scanRapidAPI(),
     scanPolymarket(),
     scanSXBet(),
   ]);
 
-  return [...sportsOdds, ...espnOdds, ...rapidOdds, ...polymarketOdds, ...sxbetOdds];
+  return [...sportsOdds, ...espnOdds, ...polymarketOdds, ...sxbetOdds];
 }
 
-module.exports = { scanAll, scanAllSports, scanPolymarket, scanSXBet, scanESPN, scanRapidAPI };
+module.exports = { scanAll, scanAllSports, scanPolymarket, scanSXBet, scanESPN };
