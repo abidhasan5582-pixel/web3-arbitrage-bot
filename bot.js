@@ -650,10 +650,24 @@ async function startBot() {
   console.log('Odds API:', config.oddsApiKey ? 'SET' : 'MISSING');
   console.log('Bankroll: $' + config.bankroll);
 
+  // Always start health server first (for Railway)
+  const PORT = process.env.PORT || 3000;
+  server.listen(PORT, () => {
+    console.log(`Health server running on port ${PORT}`);
+  });
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.warn(`Port ${PORT} in use — health server skipped`);
+    } else {
+      console.error('Health server error:', err.message);
+    }
+  });
+
   const missing = config.validate();
   if (missing.length > 0) {
     console.warn(`Missing env vars for Telegram bot: ${missing.join(', ')}`);
     console.warn('Bot commands will not work until these are set.');
+    console.warn('Health server is running — waiting for env vars to be set.');
     return;
   }
 
@@ -675,18 +689,6 @@ async function startBot() {
 
   const savedDemoRate = db.getSetting('demo_execution_rate');
   if (savedDemoRate) config.demoExecutionRate = parseFloat(savedDemoRate);
-
-  const PORT = process.env.PORT || 3000;
-  server.listen(PORT, () => {
-    console.log(`Health server running on port ${PORT}`);
-  });
-  server.on('error', (err) => {
-    if (err.code === 'EADDRINUSE') {
-      console.warn(`Port ${PORT} in use — health server skipped`);
-    } else {
-      console.error('Health server error:', err.message);
-    }
-  });
 
   console.log('Launching Telegram bot...');
   await bot.launch();
