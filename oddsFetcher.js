@@ -127,7 +127,11 @@ async function scanAllSports() {
         }
       }
     } catch (err) {
-      console.error(`[OddsFetcher] ${sport.name}: ${err.message}`, err.stack?.split('\n')[1]);
+      if (err.message?.includes('404')) {
+        // sport not available on free tier — skip silently
+      } else {
+        console.error(`[OddsFetcher] ${sport.name}: ${err.message}`, err.stack?.split('\n')[1]);
+      }
     }
   }
 
@@ -173,7 +177,9 @@ async function scanSXBet() {
 
   try {
     const markets = await fetchSXBetMarkets();
-    const data = Array.isArray(markets) ? markets : markets.data || [];
+    if (!markets) return results;
+    const raw = Array.isArray(markets) ? markets : markets.data;
+    const data = Array.isArray(raw) ? raw : [];
 
     for (const market of data) {
       const homeOdds = parseFloat(market.homeOdds) || 0;
@@ -215,7 +221,10 @@ async function scanESPN() {
     try {
       const url = `https://site.api.espn.com/apis/site/v2/sports/${sport.slug}/scoreboard`;
       const res = await fetchWithTimeout(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-      if (!res.ok) { console.error(`[ESPN] ${sport.name}: ${res.status}`); continue; }
+      if (!res.ok) {
+        if (res.status !== 400 && res.status !== 404) console.error(`[ESPN] ${sport.name}: ${res.status}`);
+        continue;
+      }
 
       const data = await res.json();
       const events = data.events || [];
@@ -257,7 +266,11 @@ async function scanESPN() {
         });
       }
     } catch (err) {
-      console.error(`[ESPN] ${sport.name}: ${err.message}`, err.stack?.split('\n')[1]);
+      if (err.message?.includes('400') || err.message?.includes('404')) {
+        // out of season or no games — expected, skip silently
+      } else {
+        console.error(`[ESPN] ${sport.name}: ${err.message}`, err.stack?.split('\n')[1]);
+      }
     }
   }
 

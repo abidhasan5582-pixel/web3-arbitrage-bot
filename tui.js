@@ -19,6 +19,19 @@ async function startTUI() {
   let botRunning = false;
   let scanCount = 0;
   let showPositions = false;
+  let autoScanEnabled = false;
+  let autoScanInterval = config.scanInterval || 60000;
+  let nextScanTime = 0;
+  let autoScanTimer = null;
+  let headerTimer = null;
+  let settingsMode = false;
+  let settingsSelected = 0;
+  const settingsFields = [
+    { name: 'Min ROI (%)', key: 'minROI', value: config.minArbROI * 100, step: 0.1, min: 0, max: 50 },
+    { name: 'Max Bet (%)', key: 'maxBetPct', value: config.maxBetPercent * 100, step: 1, min: 1, max: 100 },
+    { name: 'Demo Mode', key: 'demoMode', value: config.demoMode, type: 'toggle' },
+  ];
+
   const logLines = [];
 
   const header = blessed.box({
@@ -34,6 +47,7 @@ async function startTUI() {
     tags: true,
     scrollable: true,
     alwaysScroll: true,
+    scrollbar: { ch: '│', fg: 'cyan' },
     style: { fg: 'white', bg: 'black' },
     border: { type: 'line', fg: 'cyan' },
     label: ' Arbs ',
@@ -45,9 +59,10 @@ async function startTUI() {
     tags: true,
     scrollable: true,
     alwaysScroll: true,
+    scrollbar: { ch: '│', fg: 'yellow' },
     style: { fg: 'white', bg: 'black' },
     border: { type: 'line', fg: 'yellow' },
-    label: ' Open Positions ',
+    label: ' Positions ',
     hidden: true,
   });
 
@@ -57,6 +72,7 @@ async function startTUI() {
     tags: true,
     scrollable: true,
     alwaysScroll: true,
+    scrollbar: { ch: '│', fg: 'green' },
     style: { fg: 'green', bg: 'black' },
     border: { type: 'line', fg: 'cyan' },
     label: ' Log ',
@@ -69,33 +85,56 @@ async function startTUI() {
     style: { fg: 'cyan', bg: 'blue' },
   });
 
+  const settingsBox = blessed.box({
+    top: 'center', left: 'center',
+    width: '40%', height: 10,
+    content: '',
+    tags: true,
+    border: { type: 'line', fg: 'yellow' },
+    label: ' Settings ',
+    style: { fg: 'white', bg: 'black' },
+    hidden: true,
+    keys: false,
+    vi: false,
+  });
+
   function log(msg) {
     const time = new Date().toLocaleTimeString();
     logLines.push(`[${time}] ${msg}`);
-    if (logLines.length > 100) logLines.shift();
+    if (logLines.length > 200) logLines.shift();
     logBox.setContent(logLines.join('\n'));
     screen.render();
-    try { logBox.setScrollPerc(100); screen.render(); } catch (_) {}
+    try {
+      logBox.setScrollPerc(100);
+      screen.render();
+    } catch (_) {}
   }
 
   function updateHeader() {
-    const botStatus = botRunning ? '{green-fg}BOT ACTIVE{/green-fg}' : '{yellow-fg}BOT OFF{/yellow-fg}';
+    const botStatus = botRunning ? '{green-fg}BOT{/green-fg}' : '{yellow-fg}BOT OFF{/yellow-fg}';
     const missing = config.validate();
-    const botReady = missing.length === 0;
     const demo = db.getDemoSummary();
-    const demoStatus = config.demoMode ? '{green-fg}DEMO ON{/green-fg}' : '{yellow-fg}DEMO OFF{/yellow-fg}';
-    const demoProfit = (demo.total_profit || 0) >= 0 ? '{green-fg}+$' + (demo.total_profit || 0).toFixed(2) + '{/green-fg}' : '{red-fg}-$' + Math.abs(demo.total_profit || 0).toFixed(2) + '{/red-fg}';
+    const demoStatus = config.demoMode ? '{green-fg}DEMO{/green-fg}' : '{yellow-fg}DEMO OFF{/yellow-fg}';
+    const demoProfit = (demo.total_profit || 0) >= 0
+      ? '{green-fg}+$' + (demo.total_profit || 0).toFixed(2) + '{/green-fg}'
+      : '{red-fg}-$' + Math.abs(demo.total_profit || 0).toFixed(2) + '{/red-fg}';
+    const autoStatus = autoScanEnabled
+      ? `{cyan-fg}AUTO ${Math.max(0, Math.round((nextScanTime - Date.now()) / 1000))}s{/cyan-fg}`
+      : '';
     header.setContent([
-      `{bold}Web3 Sports Arbitrage Scanner{/bold}    Bankroll: $${config.bankroll}  |  ${botStatus}  |  ${demoStatus}  |  Scans: ${scanCount}`,
-      `Min ROI: ${(config.minArbROI * 100).toFixed(1)}%  |  Max Bet: $${(config.bankroll * config.maxBetPercent).toFixed(2)}  |  Telegram: ${botReady ? '{green-fg}✓{/green-fg}' : '{red-fg}✗{/red-fg}'}`,
-      `Demo: ${demo.open_count || 0} open | ${demo.closed_count || 0} closed | P&L: ${demoProfit}`,
+      `{bold}Web3 Sports Arbitrage Scanner{/bold}    $${config.bankroll}  |  ${botStatus}  |  ${demoStatus}  |  ${autoStatus}  |  Scan: ${scanCount}`,
+      `ROI: ${(config.minArbROI * 100).toFixed(1)}%  |  Bet: $${(config.bankroll * config.maxBetPercent).toFixed(2)}  |  Tg: ${missing.length === 0 ? '{green-fg}✓{/green-fg}' : '{red-fg}✗{/red-fg}'}`,
+      `Demo: ${demo.open_count || 0} open | ${demo.closed_count || 0} closed | ${demoProfit}`,
     ].join('\n'));
     screen.render();
   }
 
   function updateHelp() {
-    const mode = showPositions ? ' [POSITIONS] ' : ' [ARBS] ';
-    helpBox.setContent(' {bold}r{/bold} scan  {bold}b{/bold} bot  {bold}p{/bold}' + mode + ' {bold}d{/bold} data  {bold}q{/bold} quit');
+    const mode = showPositions ? ' POSITIONS ' : ' ARBS ';
+    const autoLabel = autoScanEnabled ? '{bold}a{/bold} stop' : '{bold}a{/bold} auto';
+    helpBox.setContent(
+      ` {bold}r{/bold} scan  {bold}b{/bold} bot  {bold}p{/bold}${mode} ${autoLabel}  {bold}d{/bold} data  {bold}c{/bold} clear  {bold}s{/bold} set  {bold}q{/bold} quit`
+    );
     screen.render();
   }
 
@@ -108,18 +147,27 @@ async function startTUI() {
       return;
     }
 
+    const platformColors = {
+      'Polymarket': 'magenta',
+      'SX Bet': 'cyan',
+      'ESPN Bet': 'blue',
+      'OddsPapi': 'white',
+    };
+
     const hdr = '{underline} #  Event                      Odds A    Odds B    ROI%   Profit  Risk{/underline}';
     content += hdr + '\n';
 
-    arbs.slice(0, 12).forEach((a, i) => {
+    arbs.slice(0, 20).forEach((a, i) => {
       const event = (a.event || '').substring(0, 24).padEnd(24);
       const oA = (a.oddsA || 0).toFixed(2).padStart(7);
       const oB = (a.oddsB || 0).toFixed(2).padStart(8);
       const roi = (a.roi || 0).toFixed(2).padStart(6) + '%';
       const profit = '$' + (a.profit || 0).toFixed(2).padStart(5);
       const risk = (a.riskLevel || '?').padStart(6);
-      const color = a.riskLevel === 'high' ? 'red' : a.riskLevel === 'medium' ? 'yellow' : 'green';
-      content += ` ${String(i + 1).padStart(2)}  ${event} ${oA} ${oB} ${roi} {${color}-fg}${profit}{/} {${color}-fg}${risk}{/}\n`;
+      const riskColor = a.riskLevel === 'high' ? 'red' : a.riskLevel === 'medium' ? 'yellow' : 'green';
+      const colorA = platformColors[a.platformA] || 'white';
+      const colorB = platformColors[a.platformB] || 'white';
+      content += ` ${String(i + 1).padStart(2)}  ${event} {${colorA}-fg}${oA}{/} {${colorB}-fg}${oB}{/} ${roi} {${riskColor}-fg}${profit}{/} {${riskColor}-fg}${risk}{/}\n`;
     });
     arbsBox.setContent(content);
     screen.render();
@@ -134,22 +182,24 @@ async function startTUI() {
       content += '{yellow-fg}No open positions{/yellow-fg}\n';
     } else {
       open.slice(0, 8).forEach((t, i) => {
-        const event = (t.event || '').substring(0, 18).padEnd(18);
-        const expPnl = (t.expected_profit || 0);
+        const event = (t.event || '').substring(0, 13).padEnd(13);
+        const expPnl = t.expected_profit || 0;
         const held = Math.floor((Date.now() - new Date(t.opened_at).getTime()) / 60000);
+        const stake = t.total_staked || 0;
         const color = expPnl >= 0 ? 'green' : 'red';
-        content += `${i + 1}. ${event} {${color}-fg}$${expPnl.toFixed(4)}{/} ${held}m\n`;
+        content += `${i + 1}. ${event} {${color}-fg}$${expPnl.toFixed(4)}{/} $${stake.toFixed(2)} ${held}m\n`;
       });
     }
 
-    content += '\n{bold}Recent Closed{/bold}\n\n';
+    content += '\n{bold}Closed (last 5){/bold}\n\n';
     if (closed.length === 0) {
       content += '{yellow-fg}None yet{/yellow-fg}\n';
     } else {
       closed.slice(0, 5).forEach((t, i) => {
-        const event = (t.event || '').substring(0, 18).padEnd(18);
+        const event = (t.event || '').substring(0, 13).padEnd(13);
         const color = t.profit >= 0 ? 'green' : 'red';
-        content += `${i + 1}. ${event} {${color}-fg}$${t.profit.toFixed(4)}{/} (${t.roi.toFixed(1)}%)\n`;
+        const stake = t.total_staked || 0;
+        content += `${i + 1}. ${event} {${color}-fg}$${t.profit.toFixed(4)}{/} $${stake.toFixed(2)} (${t.roi.toFixed(1)}%)\n`;
       });
     }
 
@@ -166,23 +216,126 @@ async function startTUI() {
     screen.render();
   }
 
+  function getActiveBox() {
+    return showPositions ? positionsBox : arbsBox;
+  }
+
+  function scrollActiveBox(dir) {
+    const box = getActiveBox();
+    try {
+      const current = box.getScrollPerc();
+      const newPerc = Math.max(0, Math.min(100, current + dir * 10));
+      box.setScrollPerc(newPerc);
+      screen.render();
+    } catch (_) {}
+  }
+
+  function scrollLogBox(dir) {
+    try {
+      const current = logBox.getScrollPerc();
+      const newPerc = Math.max(0, Math.min(100, current + dir * 10));
+      logBox.setScrollPerc(newPerc);
+      screen.render();
+    } catch (_) {}
+  }
+
+  function renderSettings() {
+    let content = '{bold}↑↓ select  ←→ adjust  Space toggle  Enter save  Esc cancel{/bold}\n\n';
+    settingsFields.forEach((f, i) => {
+      const prefix = i === settingsSelected ? '{cyan-fg}▶ {/cyan-fg}' : '   ';
+      let val;
+      if (f.type === 'toggle') {
+        val = f.value ? '{green-fg}ON{/green-fg}' : '{red-fg}OFF{/red-fg}';
+      } else {
+        val = f.value.toFixed(f.step >= 1 ? 0 : 1);
+      }
+      content += `${prefix}${f.name}: ${val}\n`;
+    });
+    content += '\n {green-fg}[Enter]{/green-fg} Save  {red-fg}[Esc]{/red-fg} Cancel';
+    settingsBox.setContent(content);
+    settingsBox.hidden = false;
+    screen.render();
+  }
+
+  function showSettings() {
+    settingsSelected = 0;
+    settingsMode = true;
+    settingsFields[0].value = config.minArbROI * 100;
+    settingsFields[1].value = config.maxBetPercent * 100;
+    settingsFields[2].value = config.demoMode;
+    renderSettings();
+  }
+
+  function hideSettings() {
+    settingsMode = false;
+    settingsBox.hidden = true;
+    screen.render();
+  }
+
+  function saveSettings() {
+    config.minArbROI = settingsFields[0].value / 100;
+    config.maxBetPercent = settingsFields[1].value / 100;
+    config.demoMode = settingsFields[2].value;
+    log(`{green-fg}Settings saved: ROI ${(config.minArbROI * 100).toFixed(1)}%, Bet ${(config.maxBetPercent * 100).toFixed(0)}%, Demo ${config.demoMode ? 'ON' : 'OFF'}{/green-fg}`);
+    hideSettings();
+    updateHeader();
+    updateHelp();
+  }
+
+  function startAutoScan() {
+    if (autoScanTimer) return;
+    autoScanEnabled = true;
+    nextScanTime = Date.now() + autoScanInterval;
+    log(`{green-fg}Auto-scan every ${Math.round(autoScanInterval / 1000)}s{/green-fg}`);
+    updateHeader();
+    updateHelp();
+    const tick = () => {
+      if (!autoScanEnabled) return;
+      if (Date.now() >= nextScanTime) {
+        doScan().then(() => {
+          nextScanTime = Date.now() + autoScanInterval;
+          if (autoScanEnabled) autoScanTimer = setTimeout(tick, autoScanInterval);
+        });
+        return;
+      }
+      autoScanTimer = setTimeout(tick, 1000);
+      updateHeader();
+    };
+    autoScanTimer = setTimeout(tick, 1000);
+  }
+
+  function stopAutoScan() {
+    autoScanEnabled = false;
+    if (autoScanTimer) {
+      clearTimeout(autoScanTimer);
+      autoScanTimer = null;
+    }
+    log('{yellow-fg}Auto-scan stopped{/yellow-fg}');
+    updateHeader();
+    updateHelp();
+  }
+
+  function toggleAutoScan() {
+    if (autoScanEnabled) stopAutoScan();
+    else startAutoScan();
+  }
+
   async function doScan() {
     scanCount++;
     updateHeader();
     log('Scan started...');
-    arbsBox.setContent('{yellow-fg}Scanning odds from all platforms...{/yellow-fg}');
+    const activeBox = getActiveBox();
+    activeBox.setContent('{yellow-fg}Scanning odds from all platforms...{/yellow-fg}');
     screen.render();
 
     try {
       const allData = await odds.scanAll();
       const oddsData = Array.isArray(allData) ? allData : [];
-
       log(`Fetched ${oddsData.length} odds entries`);
       const detected = arb.findArbitrages(oddsData);
-
       log(`Found ${detected.length} arbitrage opportunities`);
-      detected.forEach(a => {
-        log(`${a.riskLevel.toUpperCase()}: ${a.event} — ${a.roi.toFixed(2)}% ROI`);
+      detected.slice(0, 5).forEach(a => {
+        log(`${a.riskLevel.toUpperCase()} ${a.platformA}/${a.platformB}: ${a.event} — ${a.roi.toFixed(2)}%`);
       });
 
       const demo = db.getDemoSummary();
@@ -190,50 +343,50 @@ async function startTUI() {
         log(`{bold}🎮 ${demo.open_count} open demo trades{/bold}`);
       }
 
-      renderArbs(detected, ` Arbitrage Opportunities (${detected.length} found) `);
+      renderArbs(detected, ` Arbitrage (${detected.length} found) `);
       renderPositions();
       updateHeader();
     } catch (err) {
       log(`{red-fg}Scan error: ${err.message}{/red-fg}`);
-      arbsBox.setContent(`{red-fg}Error: ${err.message}{/red-fg}`);
+      const activeBox = getActiveBox();
+      activeBox.setContent(`{red-fg}Error: ${err.message}{/red-fg}`);
       screen.render();
     }
   }
 
   async function toggleBot() {
     if (botRunning) {
-      log('Stopping Telegram bot...');
+      log('Stopping bot...');
       try {
         if (botModule && botModule.bot) {
-          botModule.bot.stop('user_stop');
+          await botModule.bot.stop('user_stop');
         }
         botRunning = false;
-        log('{yellow-fg}Telegram bot stopped{/yellow-fg}');
+        log('{yellow-fg}Bot stopped{/yellow-fg}');
       } catch (err) {
         log(`{red-fg}Error stopping bot: ${err.message}{/red-fg}`);
       }
     } else {
-      log('Starting Telegram bot...');
+      log('{yellow-fg}Starting bot — Railway bot may conflict{/yellow-fg}');
       try {
         if (botModule && botModule.startBot) {
-          botModule.startBot().then(() => {
-            botRunning = true;
-            log('{green-fg}Telegram bot started{/green-fg}');
-            updateHeader();
-          }).catch(err => {
-            log(`{red-fg}Bot start failed: ${err.message}{/red-fg}`);
-          });
+          await botModule.startBot();
+          botRunning = true;
+          log('{green-fg}Bot started{/green-fg}');
         } else {
-          log('{red-fg}Bot module not available (missing TELEGRAM_BOT_TOKEN?){/red-fg}');
+          log('{red-fg}Bot module unavailable (missing TELEGRAM_BOT_TOKEN?){/red-fg}');
         }
       } catch (err) {
-        log(`{red-fg}Error: ${err.message}{/red-fg}`);
+        log(`{red-fg}Bot start failed: ${err.message}{/red-fg}`);
       }
     }
     updateHeader();
   }
 
   screen.key(['q', 'C-c'], () => {
+    if (settingsMode) return;
+    if (autoScanEnabled) stopAutoScan();
+    if (headerTimer) clearInterval(headerTimer);
     if (botRunning && botModule && botModule.bot) {
       botModule.bot.stop('user_quit');
     }
@@ -241,14 +394,129 @@ async function startTUI() {
     process.exit(0);
   });
 
-  screen.key(['r'], () => doScan());
-  screen.key(['b'], () => toggleBot());
-  screen.key(['p'], () => togglePanel());
+  screen.key(['r'], () => {
+    if (settingsMode) return;
+    doScan();
+  });
+
+  screen.key(['b'], () => {
+    if (settingsMode) return;
+    toggleBot();
+  });
+
+  screen.key(['p'], () => {
+    if (settingsMode) return;
+    togglePanel();
+  });
+
+  screen.key(['a'], () => {
+    if (settingsMode) return;
+    toggleAutoScan();
+  });
+
   screen.key(['d'], () => {
+    if (settingsMode) return;
     const demo = db.getDemoSummary();
     log(`Demo: ${demo.open_count} open, ${demo.closed_count} closed, P&L: $${(demo.total_profit || 0).toFixed(2)}`);
-    const arbs = db.getRecentArbs(5);
-    arbs.forEach(a => log(`  Arb: ${a.event} — ${a.roi}% ROI`));
+  });
+
+  screen.key(['c'], () => {
+    if (settingsMode) return;
+    log('{red-fg}Clearing all demo data...{/red-fg}');
+    db.clearDemoData();
+    updateHeader();
+    renderPositions();
+    log('{green-fg}Demo data cleared{/green-fg}');
+  });
+
+  screen.key(['up', 'k'], () => {
+    if (settingsMode) {
+      settingsSelected = Math.max(0, settingsSelected - 1);
+      renderSettings();
+      return;
+    }
+    scrollActiveBox(-1);
+  });
+
+  screen.key(['down', 'j'], () => {
+    if (settingsMode) {
+      settingsSelected = Math.min(settingsFields.length - 1, settingsSelected + 1);
+      renderSettings();
+      return;
+    }
+    scrollActiveBox(1);
+  });
+
+  screen.key(['pageup'], () => {
+    if (settingsMode) return;
+    const box = getActiveBox();
+    try {
+      const current = box.getScrollPerc();
+      box.setScrollPerc(Math.max(0, current - 25));
+      screen.render();
+    } catch (_) {}
+  });
+
+  screen.key(['pagedown'], () => {
+    if (settingsMode) return;
+    const box = getActiveBox();
+    try {
+      const current = box.getScrollPerc();
+      box.setScrollPerc(Math.min(100, current + 25));
+      screen.render();
+    } catch (_) {}
+  });
+
+  screen.key(['\['], () => {
+    if (settingsMode) return;
+    scrollLogBox(-1);
+  });
+
+  screen.key(['\]'], () => {
+    if (settingsMode) return;
+    scrollLogBox(1);
+  });
+
+  screen.key(['left'], () => {
+    if (!settingsMode) return;
+    const f = settingsFields[settingsSelected];
+    if (f.type !== 'toggle') {
+      f.value = Math.max(f.min || 0, +(f.value - f.step).toFixed(2));
+      renderSettings();
+    }
+  });
+
+  screen.key(['right'], () => {
+    if (!settingsMode) return;
+    const f = settingsFields[settingsSelected];
+    if (f.type !== 'toggle') {
+      f.value = Math.min(f.max || 100, +(f.value + f.step).toFixed(2));
+      renderSettings();
+    }
+  });
+
+  screen.key(['enter'], () => {
+    if (settingsMode) {
+      saveSettings();
+      return;
+    }
+  });
+
+  screen.key(['escape'], () => {
+    if (settingsMode) {
+      hideSettings();
+      log('{yellow-fg}Settings cancelled{/yellow-fg}');
+      return;
+    }
+  });
+
+  screen.key(['space'], () => {
+    if (!settingsMode) return;
+    const f = settingsFields[settingsSelected];
+    if (f.type === 'toggle') {
+      f.value = !f.value;
+      renderSettings();
+    }
   });
 
   updateHeader();
@@ -256,13 +524,14 @@ async function startTUI() {
   logBox.setContent(
     `Web3 Sports Arbitrage Scanner v2\n` +
     `Bankroll: $${config.bankroll} | Max bet: $${(config.bankroll * config.maxBetPercent).toFixed(2)}\n` +
-    `Press r to scan | p to toggle positions panel\n`
+    `Press r to scan | p for positions | a for auto-scan | s for settings\n`
   );
   screen.render();
+  log('Scanner started — press r to scan');
 
-  log('Scanner started — press r to scan, p for positions');
-
-  doScan();
+  headerTimer = setInterval(() => {
+    if (autoScanEnabled) updateHeader();
+  }, 1000);
 }
 
 startTUI().catch(err => {
