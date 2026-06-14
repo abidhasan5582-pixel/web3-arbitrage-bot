@@ -28,5 +28,7 @@ describe('oddsFetcher exports', () => {
     assert.ok(typeof oddsFetcher.scanAll === 'function');
     assert.ok(typeof oddsFetcher.scanPolymarket === 'function');
     assert.ok(typeof oddsFetcher.scanSXBet === 'function');
+    assert.ok(typeof oddsFetcher.scanESPN === 'function');
+    assert.ok(typeof oddsFetcher.scanRapidAPI === 'function');
   });
 });

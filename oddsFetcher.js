@@ -17,6 +17,20 @@ const SPORTS = [
   { key: 'mma_mixed_martial_arts', name: 'UFC' },
 ];
 
+const ESPN_SPORTS = [
+  { slug: 'baseball/mlb', name: 'MLB' },
+  { slug: 'basketball/nba', name: 'NBA' },
+  { slug: 'hockey/nhl', name: 'NHL' },
+  { slug: 'americanfootball/nfl', name: 'NFL' },
+  { slug: 'americanfootball/ncaaf', name: 'NCAAF' },
+  { slug: 'basketball/ncaab', name: 'NCAAB' },
+  { slug: 'soccer/eng.1', name: 'EPL' },
+  { slug: 'soccer/esp.1', name: 'La Liga' },
+  { slug: 'soccer/ita.1', name: 'Serie A' },
+  { slug: 'soccer/ger.1', name: 'Bundesliga' },
+  { slug: 'soccer/fra.1', name: 'Ligue 1' },
+];
+
 const ODDS_API_BASE = 'https://api.the-odds-api.com/v4';
 const POLYMARKET_API = 'https://clob.polymarket.com';
 const SXBET_API = 'https://api.sx.bet';
@@ -187,14 +201,144 @@ async function scanSXBet() {
   return results;
 }
 
+function americanToDecimal(american) {
+  if (!american) return 0;
+  const v = parseInt(String(american).replace(/[+\s]/g, ''), 10);
+  if (isNaN(v)) return 0;
+  return v > 0 ? 1 + v / 100 : 1 + 100 / Math.abs(v);
+}
+
+async function scanESPN() {
+  const results = [];
+
+  for (const sport of ESPN_SPORTS) {
+    try {
+      const url = `https://site.api.espn.com/apis/site/v2/sports/${sport.slug}/scoreboard`;
+      const res = await fetchWithTimeout(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+      if (!res.ok) { console.error(`[ESPN] ${sport.name}: ${res.status}`); continue; }
+
+      const data = await res.json();
+      const events = data.events || [];
+      if (events.length === 0) continue;
+
+      for (const event of events) {
+        const comp = event.competitions?.[0];
+        if (!comp) continue;
+        const odds = comp.odds?.[0];
+        if (!odds?.moneyline) continue;
+
+        const homeTeam = comp.competitors?.find(c => c.homeAway === 'home');
+        const awayTeam = comp.competitors?.find(c => c.homeAway === 'away');
+        if (!homeTeam || !awayTeam) continue;
+
+        const homeMoneyline = odds.moneyline.home?.close?.odds;
+        const awayMoneyline = odds.moneyline.away?.close?.odds;
+        if (!homeMoneyline || !awayMoneyline) continue;
+
+        const homeDec = americanToDecimal(homeMoneyline);
+        const awayDec = americanToDecimal(awayMoneyline);
+        if (homeDec <= 1 || awayDec <= 1) continue;
+
+        const homeName = homeTeam.team?.displayName || homeTeam.team?.name || 'Home';
+        const awayName = awayTeam.team?.displayName || awayTeam.team?.name || 'Away';
+        const eventName = event.name || `${awayName} at ${homeName}`;
+
+        results.push({
+          event: eventName,
+          sport: sport.name,
+          home: homeName,
+          away: awayName,
+          platformA: `ESPN (${odds.provider?.name || 'DraftKings'})`,
+          oddsA: homeDec,
+          platformB: `ESPN (${odds.provider?.name || 'DraftKings'})`,
+          oddsB: awayDec,
+          source: 'espn',
+          commenceTime: event.date,
+        });
+      }
+    } catch (err) {
+      console.error(`[ESPN] ${sport.name}: ${err.message}`, err.stack?.split('\n')[1]);
+    }
+  }
+
+  return results;
+}
+
+async function scanRapidAPI() {
+  const apiKey = config.rapidapiKey;
+  if (!apiKey) return [];
+
+  const results = [];
+  const headers = {
+    'x-rapidapi-key': apiKey,
+    'x-rapidapi-host': 'api-football-v1.p.rapidapi.com',
+  };
+
+  const leagues = [
+    { id: 39, name: 'EPL' },
+    { id: 140, name: 'La Liga' },
+    { id: 135, name: 'Serie A' },
+    { id: 78, name: 'Bundesliga' },
+    { id: 61, name: 'Ligue 1' },
+  ];
+
+  for (const league of leagues) {
+    try {
+      const url = `https://api-football-v1.p.rapidapi.com/v3/odds?league=${league.id}&season=2025&bookmaker=8&page=1`;
+      const res = await fetchWithTimeout(url, { headers });
+      if (!res.ok) { console.error(`[RapidAPI] ${league.name}: ${res.status}`); continue; }
+
+      const data = await res.json();
+      const oddsList = Array.isArray(data?.response) ? data.response : [];
+
+      for (const item of oddsList) {
+        const fixture = item.fixture;
+        const teams = item.teams;
+        if (!fixture || !teams) continue;
+        const bookmakers = item.bookmakers?.[0];
+        if (!bookmakers) continue;
+        const bets = bookmakers.bets?.[0];
+        if (!bets?.values) continue;
+
+        const homeVal = bets.values.find(v => v.value === 'Home');
+        const awayVal = bets.values.find(v => v.value === 'Away');
+        if (!homeVal || !awayVal) continue;
+
+        const homeDec = parseFloat(homeVal.odd);
+        const awayDec = parseFloat(awayVal.odd);
+        if (!homeDec || !awayDec || homeDec <= 1 || awayDec <= 1) continue;
+
+        results.push({
+          event: `${teams.home.name} vs ${teams.away.name}`,
+          sport: league.name,
+          home: teams.home.name,
+          away: teams.away.name,
+          platformA: `RapidAPI (${bookmakers.name})`,
+          oddsA: homeDec,
+          platformB: `RapidAPI (${bookmakers.name})`,
+          oddsB: awayDec,
+          source: 'rapidapi',
+          commenceTime: fixture.date,
+        });
+      }
+    } catch (err) {
+      console.error(`[RapidAPI] ${league.name}: ${err.message}`, err.stack?.split('\n')[1]);
+    }
+  }
+
+  return results;
+}
+
 async function scanAll() {
-  const [sportsOdds, polymarketOdds, sxbetOdds] = await Promise.all([
+  const [sportsOdds, espnOdds, rapidOdds, polymarketOdds, sxbetOdds] = await Promise.all([
     scanAllSports(),
+    scanESPN(),
+    scanRapidAPI(),
     scanPolymarket(),
     scanSXBet(),
   ]);
 
-  return [...sportsOdds, ...polymarketOdds, ...sxbetOdds];
+  return [...sportsOdds, ...espnOdds, ...rapidOdds, ...polymarketOdds, ...sxbetOdds];
 }
 
-module.exports = { scanAll, scanAllSports, scanPolymarket, scanSXBet };
+module.exports = { scanAll, scanAllSports, scanPolymarket, scanSXBet, scanESPN, scanRapidAPI };
