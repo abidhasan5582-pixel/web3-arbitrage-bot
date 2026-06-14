@@ -49,6 +49,44 @@ function formatArbMessage(arb, index) {
   return msg;
 }
 
+async function closeCompletedDemoTrades() {
+  const open = db.getOpenDemoTrades();
+  if (open.length === 0) return [];
+
+  const scores = await oddsFetcher.scanScores();
+  const closed = [];
+
+  for (const trade of open) {
+    const match = scores.find(s =>
+      s.event === trade.event ||
+      (s.home === trade.home && s.away === trade.away) ||
+      (s.home === trade.away && s.away === trade.home)
+    );
+    if (!match) continue;
+
+    const stakeA = trade.stake_a;
+    const stakeB = trade.stake_b;
+    const totalStake = stakeA + stakeB;
+    const isHomeWinner = match.winner === 'home';
+    const betOnHome = trade.home === match.homeName || trade.home === match.home;
+
+    let payout;
+    if ((isHomeWinner && betOnHome) || (!isHomeWinner && !betOnHome)) {
+      payout = stakeA * trade.odds_a;
+    } else {
+      payout = stakeB * trade.odds_b;
+    }
+    const actualProfit = payout - totalStake;
+    const actualRoi = (actualProfit / totalStake) * 100;
+
+    db.closeDemoTrade(trade.id, actualProfit, actualRoi);
+    closed.push({ ...trade, actualProfit, actualRoi });
+    console.log(`[Demo] CLOSED #${trade.id}: ${trade.event} | P&L: $${actualProfit.toFixed(4)} (${actualRoi.toFixed(2)}%)`);
+  }
+
+  return closed;
+}
+
 async function performScan(ctx, sportFilter) {
   if (isScanning) {
     if (ctx) await ctx.reply('Scan already in progress. Please wait...');
@@ -59,6 +97,15 @@ async function performScan(ctx, sportFilter) {
   scanCount++;
 
   try {
+    const closedTrades = await closeCompletedDemoTrades();
+    if (closedTrades.length > 0 && !ctx) {
+      for (const t of closedTrades) {
+        const emoji = t.actualProfit >= 0 ? '🟢' : '🔴';
+        const closeMsg = `${emoji} *Demo Trade CLOSED*\n\n📅 ${t.event}\n💰 P&L: $${t.actualProfit.toFixed(4)} (${t.actualRoi.toFixed(2)}%)\n⏱ Held ${Math.floor((Date.now() - new Date(t.opened_at).getTime()) / 60000)}m`;
+        try { await bot.telegram.sendMessage(config.telegramChatId, closeMsg, { parse_mode: 'Markdown' }); } catch (_) {}
+      }
+    }
+
     if (ctx) await ctx.reply('🔍 Scanning odds across all sports...');
 
     let oddsData = await oddsFetcher.scanAll();
@@ -85,30 +132,45 @@ async function performScan(ctx, sportFilter) {
 
     let demoExecuted = 0;
     let demoProfitTotal = 0;
+    let openedTrades = [];
     if (config.demoMode && arbs.length > 0) {
-      const executable = arbs.filter(a => a.riskLevel !== 'high' && a.roi >= config.minArbROI * 100);
-      for (const arb of executable) {
+      const bestPerEvent = {};
+      for (const arb of arbs) {
+        if (arb.riskLevel === 'high' || arb.roi < config.minArbROI * 100) continue;
+        const key = arb.event;
+        if (!bestPerEvent[key] || arb.roi > bestPerEvent[key].roi) {
+          bestPerEvent[key] = arb;
+        }
+      }
+      const uniqueArbs = Object.values(bestPerEvent);
+      for (const arb of uniqueArbs) {
         if (Math.random() > config.demoExecutionRate) continue;
-        const demoBankroll = config.bankroll;
-        const stake = demoBankroll * config.maxBetPercent;
+        const stake = config.bankroll * config.maxBetPercent;
         const arbProfit = (stake * arb.roi) / 100;
-        db.logDemoTrade({
+        db.openDemoTrade({
           event: arb.event,
           sport: arb.sport,
+          home: arb.home || '',
+          away: arb.away || '',
           platformA: arb.platformA,
           oddsA: arb.oddsA,
           stakeA: arb.stakeA || (stake / 2),
           platformB: arb.platformB,
           oddsB: arb.oddsB,
           stakeB: arb.stakeB || (stake / 2),
-          guaranteedReturn: stake + arbProfit,
+          expectedProfit: arbProfit,
+          expectedRoi: arb.roi,
           profit: arbProfit,
           roi: arb.roi,
+          source: arb.source,
+          commenceTime: arb.commenceTime,
         });
         demoExecuted++;
         demoProfitTotal += arbProfit;
+        openedTrades.push(arb);
       }
       if (demoExecuted > 0) {
+        const today = new Date().toISOString().split('T')[0];
         db.updateDemoStats(today, {
           profit: demoProfitTotal,
           trades: demoExecuted,
@@ -116,7 +178,7 @@ async function performScan(ctx, sportFilter) {
           losses: demoProfitTotal <= 0 ? demoExecuted : 0,
           bestRoi: Math.max(...arbs.map(a => a.roi)),
         });
-        console.log(`[Demo] Executed ${demoExecuted} trades, P&L: $${demoProfitTotal.toFixed(2)}`);
+        console.log(`[Demo] Opened ${demoExecuted} trades, est. P&L: $${demoProfitTotal.toFixed(2)}`);
       }
     }
 
@@ -161,10 +223,16 @@ async function performScan(ctx, sportFilter) {
         console.error('Alert send failed:', err.message);
       }
 
-      if (config.demoMode && demoExecuted > 0) {
-        try {
-          await bot.telegram.sendMessage(config.telegramChatId, `🎮 *Demo: ${demoExecuted} trades executed*\nP&L: $${demoProfitTotal.toFixed(2)}`, { parse_mode: 'Markdown' });
-        } catch (_) {}
+      if (config.demoMode && openedTrades.length > 0) {
+        for (const arb of openedTrades) {
+          const stake = config.bankroll * config.maxBetPercent;
+          const arbProfit = (stake * arb.roi) / 100;
+          const openMsg = `🎮 *Demo Trade OPEN*\n\n📅 ${arb.event}\n🏠 ${arb.platformA} @ ${arb.oddsA}\n✈️ ${arb.platformB} @ ${arb.oddsB}\n💰 Stake: $${stake.toFixed(2)}\n📈 Est. Profit: $${arbProfit.toFixed(4)} (${arb.roi}%)`;
+          try {
+            await bot.telegram.sendMessage(config.telegramChatId, openMsg, { parse_mode: 'Markdown' });
+            await new Promise(r => setTimeout(r, 500));
+          } catch (_) {}
+        }
       }
     }
 
@@ -197,6 +265,7 @@ bot.start(async (ctx) => {
     `• /strategy — AI daily strategy\n` +
     `• /auto on — Start auto-scanning\n` +
     `• /demo — Demo trading mode & P&L\n` +
+    `• /positions — View open demo trades\n` +
     `• /trades — View recent demo trades\n` +
     `• /help — All commands\n\n` +
     `*Your bankroll:* $${config.bankroll.toFixed(2)}`;
@@ -229,7 +298,8 @@ bot.help(async (ctx) => {
     `/demo — Show demo status & P&L\n` +
     `/demo on/off — Toggle demo mode\n` +
     `/demo rate 0.3 — Set execution rate\n` +
-    `/trades — View recent demo trades`;
+    `/positions — View open positions\n` +
+    `/trades — View closed trades`;
 
   await ctx.reply(helpMsg, { parse_mode: 'Markdown' });
 });
@@ -457,7 +527,7 @@ bot.command('status', async (ctx) => {
     `🔔 Alerts: ${config.alertsEnabled ? 'ON' : 'OFF'}\n` +
     `🔄 Auto-Scan: ${autoScanTimer ? 'RUNNING' : 'STOPPED'}\n` +
     `🎮 Demo Mode: ${config.demoMode ? 'ON' : 'OFF'}\n` +
-    `📊 Demo Trades: ${demoSummary.count || 0} | P&L: $${(demoSummary.total_profit || 0).toFixed(2)}`,
+    `📊 Open: ${demoSummary.open_count || 0} | Closed: ${demoSummary.closed_count || 0} | P&L: $${(demoSummary.total_profit || 0).toFixed(2)}`,
     { parse_mode: 'Markdown' }
   );
 });
@@ -496,32 +566,58 @@ bot.command('demo', async (ctx) => {
     `Status: ${config.demoMode ? '🟢 ON' : '🔴 OFF'}\n` +
     `Execution Rate: ${(config.demoExecutionRate * 100).toFixed(0)}%\n` +
     `Bankroll: $${config.bankroll.toFixed(2)}\n` +
-    `Total Trades: ${summary.count || 0}\n` +
-    `Total Staked: $${(summary.total_staked || 0).toFixed(2)}\n` +
+    `Open Trades: ${summary.open_count || 0} (est. $${(summary.expected_pnl || 0).toFixed(2)})\n` +
+    `Closed Trades: ${summary.closed_count || 0}\n` +
     `Total P&L: $${(summary.total_profit || 0).toFixed(2)}\n` +
     `Avg ROI: ${(summary.avg_roi || 0).toFixed(2)}%\n` +
     `Today: ${summary.today_trades || 0} trades | $${(summary.today_profit || 0).toFixed(2)}\n\n` +
     `*Commands:*\n` +
     `• /demo on/off — Toggle\n` +
     `• /demo rate 0.3 — Set execution rate\n` +
-    `• /trades — View recent demo trades`;
+    `• /positions — View open trades\n` +
+    `• /trades — View closed trades`;
 
   await ctx.reply(msg, { parse_mode: 'Markdown' });
 });
 
 bot.command('trades', async (ctx) => {
-  const trades = db.getRecentBets(10, true);
+  const trades = db.getClosedDemoTrades(10);
   if (trades.length === 0) {
-    await ctx.reply('No demo trades yet. Enable demo mode with /demo on and run /scan.');
+    await ctx.reply('No closed demo trades yet. Enable demo mode with /demo on and run /scan.');
     return;
   }
 
-  let msg = `📋 *Recent Demo Trades*\n\n`;
+  let msg = `📋 *Last 10 Closed Trades*\n\n`;
   trades.forEach((t, i) => {
+    const emoji = t.profit >= 0 ? '🟢' : '🔴';
+    const held = t.closed_at ? Math.floor((new Date(t.closed_at) - new Date(t.opened_at)) / 60000) : '?';
+    msg += `${emoji} ${i + 1}. ${t.event}\n`;
+    msg += `   P&L: $${t.profit.toFixed(4)} (${t.roi.toFixed(2)}%) | Held: ${held}m\n\n`;
+  });
+  await ctx.reply(truncateMsg(msg), { parse_mode: 'Markdown' });
+});
+
+bot.command('positions', async (ctx) => {
+  const open = db.getOpenDemoTrades();
+  if (open.length === 0) {
+    await ctx.reply('No open demo positions. Run /scan with demo mode on.');
+    return;
+  }
+
+  let msg = `📊 *Open Positions (${open.length})*\n\n`;
+  let totalExposure = 0;
+  let totalExpected = 0;
+  open.forEach((t, i) => {
+    const held = Math.floor((Date.now() - new Date(t.opened_at).getTime()) / 60000);
     msg += `${i + 1}. ${t.event}\n`;
     msg += `   ${t.platform_a} @ ${t.odds_a} | ${t.platform_b} @ ${t.odds_b}\n`;
-    msg += `   Staked: $${t.total_staked.toFixed(2)} → Profit: $${t.profit.toFixed(2)} (${t.roi.toFixed(2)}%)\n\n`;
+    msg += `   Stake: $${t.total_staked.toFixed(2)} | Exp: $${t.expected_profit.toFixed(4)} (${t.expected_roi.toFixed(2)}%)\n`;
+    msg += `   ⏱ ${held}m ago\n\n`;
+    totalExposure += t.total_staked;
+    totalExpected += t.expected_profit;
   });
+  msg += `*Total Exposure:* $${totalExposure.toFixed(2)}\n`;
+  msg += `*Expected P&L:* $${totalExpected.toFixed(4)}`;
   await ctx.reply(truncateMsg(msg), { parse_mode: 'Markdown' });
 });
 
@@ -538,11 +634,6 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('Web3 Arbitrage Bot Running');
   }
-});
-
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Health server running on port ${PORT}`);
 });
 
 // Global error handler for uncaught command errors
@@ -584,6 +675,18 @@ async function startBot() {
 
   const savedDemoRate = db.getSetting('demo_execution_rate');
   if (savedDemoRate) config.demoExecutionRate = parseFloat(savedDemoRate);
+
+  const PORT = process.env.PORT || 3000;
+  server.listen(PORT, () => {
+    console.log(`Health server running on port ${PORT}`);
+  });
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.warn(`Port ${PORT} in use — health server skipped`);
+    } else {
+      console.error('Health server error:', err.message);
+    }
+  });
 
   console.log('Launching Telegram bot...');
   await bot.launch();

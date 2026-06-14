@@ -275,4 +275,55 @@ async function scanAll() {
   return [...sportsOdds, ...espnOdds, ...polymarketOdds, ...sxbetOdds];
 }
 
-module.exports = { scanAll, scanAllSports, scanPolymarket, scanSXBet, scanESPN };
+async function scanScores() {
+  const results = [];
+
+  for (const sport of ESPN_SPORTS) {
+    try {
+      const url = `https://site.api.espn.com/apis/site/v2/sports/${sport.slug}/scoreboard`;
+      const res = await fetchWithTimeout(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+      if (!res.ok) continue;
+
+      const data = await res.json();
+      const events = data.events || [];
+      if (events.length === 0) continue;
+
+      for (const event of events) {
+        const status = event.status?.type;
+        if (!status?.completed && status?.name !== 'Final' && status?.name !== 'Finished') continue;
+
+        const comp = event.competitions?.[0];
+        if (!comp) continue;
+
+        const homeTeam = comp.competitors?.find(c => c.homeAway === 'home');
+        const awayTeam = comp.competitors?.find(c => c.homeAway === 'away');
+        if (!homeTeam || !awayTeam) continue;
+
+        const homeName = homeTeam.team?.displayName || homeTeam.team?.name || 'Home';
+        const awayName = awayTeam.team?.displayName || awayTeam.team?.name || 'Away';
+        const homeScore = parseInt(homeTeam.score) || 0;
+        const awayScore = parseInt(awayTeam.score) || 0;
+        const winner = homeScore > awayScore ? 'home' : 'away';
+        const winnerName = winner === 'home' ? homeName : awayName;
+        const eventName = event.name || `${awayName} at ${homeName}`;
+
+        results.push({
+          event: eventName,
+          sport: sport.name,
+          home: homeName,
+          away: awayName,
+          homeScore,
+          awayScore,
+          winner,
+          winnerName,
+          completed: true,
+          commenceTime: event.date,
+        });
+      }
+    } catch (_) {}
+  }
+
+  return results;
+}
+
+module.exports = { scanAll, scanAllSports, scanPolymarket, scanSXBet, scanESPN, scanScores };

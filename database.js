@@ -87,6 +87,32 @@ async function initDatabase() {
     )
   `);
 
+  db.run(`
+    CREATE TABLE IF NOT EXISTS demo_trades (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event TEXT NOT NULL,
+      sport TEXT,
+      home TEXT,
+      away TEXT,
+      platform_a TEXT NOT NULL,
+      odds_a REAL NOT NULL,
+      stake_a REAL NOT NULL,
+      platform_b TEXT NOT NULL,
+      odds_b REAL NOT NULL,
+      stake_b REAL NOT NULL,
+      total_staked REAL NOT NULL,
+      expected_profit REAL NOT NULL,
+      expected_roi REAL NOT NULL,
+      profit REAL DEFAULT 0,
+      roi REAL DEFAULT 0,
+      status TEXT DEFAULT 'open',
+      source TEXT,
+      commence_time TEXT,
+      opened_at TEXT DEFAULT (datetime('now')),
+      closed_at TEXT
+    )
+  `);
+
   saveDb();
   return db;
 }
@@ -254,10 +280,32 @@ module.exports = {
   },
 
   logDemoTrade(trade) {
-    runSql(`INSERT INTO bets (event, sport, platform_a, odds_a, stake_a, platform_b, odds_b, stake_b, total_staked, guaranteed_return, profit, roi, status, is_demo)
-      VALUES ($event, $sport, $platformA, $oddsA, $stakeA, $platformB, $oddsB, $stakeB, $totalStaked, $guaranteedReturn, $profit, $roi, 'settled', 1)`, {
+    openDemoTrade(trade);
+  },
+
+  getDemoSummary() {
+    const open = queryOne("SELECT COUNT(*) as count, COALESCE(SUM(expected_profit), 0) as expected_pnl FROM demo_trades WHERE status='open'");
+    const closed = queryOne("SELECT COUNT(*) as count, COALESCE(SUM(profit), 0) as total_profit, COALESCE(SUM(total_staked), 0) as total_staked, COALESCE(AVG(roi), 0) as avg_roi FROM demo_trades WHERE status='closed'");
+    const today = queryOne("SELECT COUNT(*) as today_trades, COALESCE(SUM(profit), 0) as today_profit FROM demo_trades WHERE status='closed' AND date(closed_at) = date('now')");
+    return {
+      open_count: open?.count || 0,
+      expected_pnl: open?.expected_pnl || 0,
+      closed_count: closed?.count || 0,
+      total_profit: closed?.total_profit || 0,
+      total_staked: closed?.total_staked || 0,
+      avg_roi: closed?.avg_roi || 0,
+      today_trades: today?.today_trades || 0,
+      today_profit: today?.today_profit || 0,
+    };
+  },
+
+  openDemoTrade(trade) {
+    runSql(`INSERT INTO demo_trades (event, sport, home, away, platform_a, odds_a, stake_a, platform_b, odds_b, stake_b, total_staked, expected_profit, expected_roi, status, source, commence_time)
+      VALUES ($event, $sport, $home, $away, $platformA, $oddsA, $stakeA, $platformB, $oddsB, $stakeB, $totalStaked, $expectedProfit, $expectedRoi, 'open', $source, $commenceTime)`, {
       $event: trade.event,
       $sport: trade.sport || '',
+      $home: trade.home || '',
+      $away: trade.away || '',
       $platformA: trade.platformA,
       $oddsA: trade.oddsA,
       $stakeA: trade.stakeA,
@@ -265,16 +313,31 @@ module.exports = {
       $oddsB: trade.oddsB,
       $stakeB: trade.stakeB,
       $totalStaked: trade.stakeA + trade.stakeB,
-      $guaranteedReturn: trade.guaranteedReturn,
-      $profit: trade.profit,
-      $roi: trade.roi,
+      $expectedProfit: trade.expectedProfit || trade.profit || 0,
+      $expectedRoi: trade.expectedRoi || trade.roi || 0,
+      $source: trade.source || '',
+      $commenceTime: trade.commenceTime || null,
     });
   },
 
-  getDemoSummary() {
-    const rows = queryAll(`SELECT COUNT(*) as count, COALESCE(SUM(profit), 0) as total_profit, COALESCE(SUM(total_staked), 0) as total_staked, COALESCE(AVG(roi), 0) as avg_roi FROM bets WHERE is_demo = 1`);
-    const today = queryAll(`SELECT COALESCE(SUM(profit), 0) as today_profit, COUNT(*) as today_trades FROM bets WHERE is_demo = 1 AND date(created_at) = date('now')`);
-    return { ...rows[0], ...today[0] };
+  closeDemoTrade(id, actualProfit, actualRoi) {
+    runSql("UPDATE demo_trades SET status='closed', profit=$profit, roi=$roi, closed_at=datetime('now') WHERE id=$id", {
+      $id: id,
+      $profit: actualProfit,
+      $roi: actualRoi,
+    });
+  },
+
+  getOpenDemoTrades() {
+    return queryAll("SELECT * FROM demo_trades WHERE status='open' ORDER BY opened_at ASC");
+  },
+
+  getClosedDemoTrades(limit = 20) {
+    return queryAll('SELECT * FROM demo_trades WHERE status=\'closed\' ORDER BY closed_at DESC LIMIT $limit', { $limit: limit });
+  },
+
+  getAllDemoTrades(limit = 20) {
+    return queryAll('SELECT * FROM demo_trades ORDER BY opened_at DESC LIMIT $limit', { $limit: limit });
   },
 
   updateDemoStats(date, stats) {
@@ -302,6 +365,12 @@ module.exports = {
 
   getRecentDemoStats(days = 7) {
     return queryAll('SELECT * FROM demo_stats ORDER BY date DESC LIMIT $days', { $days: days });
+  },
+
+  clearDemoData() {
+    runSql('DELETE FROM bets WHERE is_demo = 1');
+    runSql('DELETE FROM demo_stats');
+    runSql('DELETE FROM demo_trades');
   },
 
   close() {
