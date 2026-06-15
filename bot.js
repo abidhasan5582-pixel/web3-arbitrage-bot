@@ -830,8 +830,20 @@ async function startBot() {
   if (savedDemoRate) config.demoExecutionRate = parseFloat(savedDemoRate);
 
   console.log('Launching Telegram bot...');
-  await bot.launch();
-  console.log('Bot started successfully');
+  // Clear any stale polling sessions (409 Conflict fix)
+  try {
+    await bot.telegram.callApi('getUpdates', { offset: 0, limit: 1, timeout: 1 });
+  } catch (_) { /* expected if no stale session */ }
+  try {
+    await bot.launch();
+    console.log('Bot started successfully');
+  } catch (err) {
+    if (err?.response?.error_code === 409) {
+      console.warn('Telegram 409: another bot instance is polling (local session?). Continuing without Telegram.');
+    } else {
+      throw err;
+    }
+  }
   console.log(`Bankroll: $${config.bankroll}`);
   console.log(`Scan interval: ${config.scanInterval / 1000}s`);
   console.log(`Alerts: ${config.alertsEnabled ? 'ON' : 'OFF'}`);
