@@ -891,6 +891,16 @@ async function startBot() {
   if (config.demoMode || config.liveMode) {
     startSettlementLoop();
   }
+
+  // Initial scan on startup (runs async, no reply needed)
+  setTimeout(() => {
+    console.log('[Bot] Running initial scan...');
+    performScan(null).then(results => {
+      console.log(`[Bot] Initial scan complete: ${results.length} opportunities found`);
+    }).catch(err => {
+      console.error('[Bot] Initial scan error:', err.message);
+    });
+  }, 5000);
 }
 
 async function main() {
