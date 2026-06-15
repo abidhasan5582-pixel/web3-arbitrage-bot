@@ -37,6 +37,10 @@ function truncateMsg(msg, maxLen = 4000) {
   return msg.slice(0, maxLen - 100) + `\n\n... (truncated, ${msg.length} total chars)`;
 }
 
+function pnl(val) {
+  return val >= 0 ? `+$${val.toFixed(2)}` : `-$${Math.abs(val).toFixed(2)}`;
+}
+
 function formatArbMessage(arb, index) {
   const icons = { low: '🟢', medium: '🟡', high: '🔴' };
   const icon = icons[arb.riskLevel] || '⚪';
@@ -110,7 +114,7 @@ async function settleTrades() {
   for (const trade of realOpen) {
     const match = scores.find(s =>
       s.event === trade.event ||
-      (s.home === trade.home && s.away === trade.away)
+      (s.home && trade.home && s.home === trade.home && s.away === trade.away)
     );
     if (!match) continue;
 
@@ -686,19 +690,82 @@ bot.command('demo', async (ctx) => {
 });
 
 bot.command('trades', async (ctx) => {
-  const trades = db.getClosedDemoTrades(10);
-  if (trades.length === 0) {
-    await ctx.reply('No closed demo trades yet. Enable demo mode with /demo on and run /scan.');
+  const args = ctx.message.text.split(' ').slice(1);
+  const sub = args[0]?.toLowerCase();
+  const isDemo = sub === 'demo' ? true : sub === 'real' || sub === 'live' ? false : undefined;
+
+  const betHistory = db.getRecentBets(15, isDemo);
+  const demoClosed = db.getClosedDemoTrades(5);
+  const realClosed = db.getClosedRealTrades(5);
+
+  if (betHistory.length === 0 && demoClosed.length === 0 && realClosed.length === 0) {
+    await ctx.reply('No trades yet. Enable demo mode with /demo on and run /scan.');
     return;
   }
 
-  let msg = `📋 *Last 10 Settled Trades*\n\n`;
-  trades.forEach((t, i) => {
-    const emoji = t.profit >= 0 ? '🟢' : '🔴';
-    const held = t.closed_at ? Math.floor((new Date(t.closed_at) - new Date(t.opened_at)) / 60000) : '?';
-    msg += `${emoji} ${i + 1}. ${t.event}\n`;
-    msg += `   P&L: $${t.profit.toFixed(4)} (${t.roi.toFixed(2)}%) | Held: ${held}m\n\n`;
+  let msg = '📋 *Trade History*\n\n';
+
+  if (betHistory.length > 0) {
+    msg += '*Unified Bets:*\n';
+    betHistory.forEach((t, i) => {
+      const emoji = (t.profit || 0) >= 0 ? '🟢' : '🔴';
+      const label = t.is_demo ? '🎮' : '🚀';
+      msg += `${label}${emoji} ${t.event}\n`;
+      msg += `   ${t.platform_a} ${t.odds_a} | ${t.platform_b} ${t.odds_b}\n`;
+      msg += `   P&L: $${(t.profit || 0).toFixed(4)} (${(t.roi || 0).toFixed(2)}%) | ${t.status}\n\n`;
+    });
+  }
+
+  msg += `*Summary:*\n`;
+  const demo = db.getDemoSummary();
+  const real = db.getRealTradeSummary();
+  msg += `🎮 Demo: ${demo.closed_count || 0} settled | ${pnl(demo.total_profit || 0)}\n`;
+  msg += `🚀 Live: ${real.closed_count || 0} settled | ${pnl(real.total_profit || 0)}`;
+
+  await ctx.reply(truncateMsg(msg), { parse_mode: 'Markdown' });
+});
+
+bot.command('history', async (ctx) => {
+  const args = ctx.message.text.split(' ').slice(1);
+  const limit = Math.min(parseInt(args[0]) || 10, 30);
+  const bets = db.getRecentBets(limit);
+
+  if (bets.length === 0) {
+    await ctx.reply('No trade history yet. Run /scan to find arbs.');
+    return;
+  }
+
+  let msg = `📜 *Last ${bets.length} Trades*\n\n`;
+  bets.forEach((t, i) => {
+    const emoji = (t.profit || 0) >= 0 ? '🟢' : '🔴';
+    const label = t.is_demo ? '🎮' : '🚀';
+    const d = (t.created_at || '').substring(0, 10);
+    msg += `${label}${emoji} ${d} ${t.event}\n`;
+    msg += `   ${t.platform_a} ${t.odds_a} → ${t.platform_b} ${t.odds_b}\n`;
+    msg += `   P&L: $${(t.profit || 0).toFixed(4)} (${(t.roi || 0).toFixed(2)}%) | ${t.status}\n\n`;
   });
+  await ctx.reply(truncateMsg(msg), { parse_mode: 'Markdown' });
+});
+
+bot.command('stats', async (ctx) => {
+  const daily = db.getRecentDailyStats(14);
+  const demo = db.getDemoSummary();
+  const real = db.getRealTradeSummary();
+  const betCount = db.getRecentBets(1000).length;
+
+  let msg = `📊 *Statistics*\n\n`;
+  msg += `*All-Time:*\n`;
+  msg += `Total bets: ${betCount}\n`;
+  msg += `🎮 Demo: ${demo.closed_count || 0} closed | ${pnl(demo.total_profit || 0)} | Avg ROI: ${(demo.avg_roi || 0).toFixed(2)}%\n`;
+  msg += `🚀 Live:  ${real.closed_count || 0} closed | ${pnl(real.total_profit || 0)} | Avg ROI: ${(real.avg_roi || 0).toFixed(2)}%\n\n`;
+
+  if (daily.length > 0) {
+    msg += `*Daily (last ${Math.min(daily.length, 14)}d):*\n`;
+    daily.slice(0, 14).forEach(d => {
+      const p = (d.profit || 0) >= 0 ? '🟢' : '🔴';
+      msg += `${p} ${d.date}: $${(d.profit || 0).toFixed(4)} | ${d.arbs_found || 0} arbs | ${d.arbs_executed || 0} exec\n`;
+    });
+  }
   await ctx.reply(truncateMsg(msg), { parse_mode: 'Markdown' });
 });
 

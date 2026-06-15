@@ -139,6 +139,25 @@ class ExchangeOrchestrator {
     result.totalProfit = arb.profit || 0;
     result.arbId = arbId;
 
+    // Unified bets table record for live trades
+    if (!config.demoMode) {
+      db.logBet({
+        event: arb.event,
+        sport: arb.sport || '',
+        platformA: arb.platformA,
+        oddsA: arb.oddsA,
+        stakeA: arb.stakeA,
+        platformB: arb.platformB,
+        oddsB: arb.oddsB,
+        stakeB: arb.stakeB,
+        guaranteedReturn: arb.profit ? (arb.stakeA + arb.stakeB + arb.profit) / 2 : 0,
+        profit: arb.profit || 0,
+        roi: arb.roi || 0,
+        status: 'pending',
+        isDemo: 0,
+      });
+    }
+
     const today = new Date().toISOString().split('T')[0];
     db.updateDailyStats(today, {
       arbsExecuted: 1,
@@ -184,6 +203,8 @@ class ExchangeOrchestrator {
     db.openRealTrade({
       arbId,
       event: arb.event,
+      home: arb.home || '',
+      away: arb.away || '',
       platform,
       side,
       odds,
@@ -297,6 +318,8 @@ class ExchangeOrchestrator {
     db.openRealTrade({
       arbId: `demo_${demoTradeId}`,
       event: arb.event,
+      home: arb.home || '',
+      away: arb.away || '',
       platform: arb.platformA,
       side: 'home',
       odds: simOddsA,
@@ -308,6 +331,8 @@ class ExchangeOrchestrator {
     db.openRealTrade({
       arbId: `demo_${demoTradeId}`,
       event: arb.event,
+      home: arb.home || '',
+      away: arb.away || '',
       platform: arb.platformB,
       side: 'away',
       odds: simOddsB,

@@ -4,14 +4,21 @@ const path = require('path');
 
 const DB_PATH = process.env.ARB_DB_PATH || path.join(__dirname, 'arbitrage.db');
 
+function getDbPath() {
+  if (process.env.ARB_DB_PATH) return process.env.ARB_DB_PATH;
+  if (fs.existsSync('/data')) return '/data/arbitrage.db';
+  return path.join(__dirname, 'arbitrage.db');
+}
+
 let db;
 let saveTimer = null;
 
 async function initDatabase() {
   const SQL = await initSqlJs();
+  const dbPath = getDbPath();
 
-  if (fs.existsSync(DB_PATH)) {
-    const buffer = fs.readFileSync(DB_PATH);
+  if (fs.existsSync(dbPath)) {
+    const buffer = fs.readFileSync(dbPath);
     db = new SQL.Database(buffer);
   } else {
     db = new SQL.Database();
@@ -76,6 +83,8 @@ async function initDatabase() {
   try { db.run("ALTER TABLE demo_trades ADD COLUMN settlement_last_checked TEXT"); } catch (_) {}
   try { db.run("ALTER TABLE real_trades ADD COLUMN settlement_last_checked TEXT"); } catch (_) {}
   try { db.run("ALTER TABLE real_trades ADD COLUMN is_demo INTEGER DEFAULT 0"); } catch (_) {}
+  try { db.run("ALTER TABLE real_trades ADD COLUMN home TEXT"); } catch (_) {}
+  try { db.run("ALTER TABLE real_trades ADD COLUMN away TEXT"); } catch (_) {}
 
   db.run(`
     CREATE TABLE IF NOT EXISTS demo_stats (
@@ -136,6 +145,8 @@ async function initDatabase() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       arb_id TEXT,
       event TEXT NOT NULL,
+      home TEXT,
+      away TEXT,
       platform TEXT NOT NULL,
       market_id TEXT,
       side TEXT NOT NULL,
@@ -167,7 +178,7 @@ function flushDb() {
     try {
       const data = db.export();
       const buffer = Buffer.from(data);
-      fs.writeFileSync(DB_PATH, buffer);
+      fs.writeFileSync(getDbPath(), buffer);
     } catch (err) {
       console.error(`[Database] flushDb error: ${err.message}`, err.stack?.split('\n')[1]);
     }
@@ -433,10 +444,12 @@ module.exports = {
   },
 
   openRealTrade(trade) {
-    runSql(`INSERT INTO real_trades (arb_id, event, platform, market_id, side, odds, stake, status, tx_hash, order_id, error, is_demo)
-      VALUES ($arbId, $event, $platform, $marketId, $side, $odds, $stake, $status, $txHash, $orderId, $error, $isDemo)`, {
+    runSql(`INSERT INTO real_trades (arb_id, event, home, away, platform, market_id, side, odds, stake, status, tx_hash, order_id, error, is_demo)
+      VALUES ($arbId, $event, $home, $away, $platform, $marketId, $side, $odds, $stake, $status, $txHash, $orderId, $error, $isDemo)`, {
       $arbId: trade.arbId || null,
       $event: trade.event,
+      $home: trade.home || null,
+      $away: trade.away || null,
       $platform: trade.platform,
       $marketId: trade.marketId || null,
       $side: trade.side,
