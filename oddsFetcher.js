@@ -1,6 +1,6 @@
 const config = require('./config');
 const { calculate2Way } = require('./arbitrage');
-const { OddsAPIClient } = require('./OddsAPIClient');
+const { OddsAPIClient } = require('odds-api-io');
 
 const ESPN_SPORTS = [
   { slug: 'baseball/mlb', name: 'MLB' },
@@ -296,7 +296,7 @@ const ODDSAPIIO_BOOKMAKERS = config.oddsapiiBookmakers || 'DraftKings,FanDuel';
 let _oddsApiClient = null;
 function getOddsAPIClient() {
   if (!_oddsApiClient && config.oddsapiiApiKey) {
-    _oddsApiClient = new OddsAPIClient(config.oddsapiiApiKey);
+    _oddsApiClient = new OddsAPIClient({ apiKey: config.oddsapiiApiKey });
   }
   return _oddsApiClient;
 }
@@ -313,7 +313,7 @@ async function scanOddsAPIio() {
       console.log(`[OddsAPI.io] ${liveIds.length} live events found`);
       for (let i = 0; i < liveIds.length; i += 10) {
         const batch = liveIds.slice(i, i + 10);
-        await _parseOddsBatch(await client.getOddsForMultipleEvents(batch, ODDSAPIIO_BOOKMAKERS), true, results);
+        await _parseOddsBatch(await client.getOddsForMultipleEvents({ eventIds: batch.join(','), bookmakers: ODDSAPIIO_BOOKMAKERS }), true, results);
       }
     }
   } catch (err) {
@@ -322,12 +322,12 @@ async function scanOddsAPIio() {
 
   for (const sport of ODDSAPIIO_SPORTS) {
     try {
-      const events = await client.getEvents(sport.slug, { status: 'pending', limit: 50 });
+      const events = await client.getEvents({ sport: sport.slug, status: 'pending', limit: 50 });
       if (!Array.isArray(events) || events.length === 0) continue;
       const ids = events.map(e => e.id).filter(Boolean);
       for (let i = 0; i < ids.length; i += 10) {
         const batch = ids.slice(i, i + 10);
-        await _parseOddsBatch(await client.getOddsForMultipleEvents(batch, ODDSAPIIO_BOOKMAKERS), false, results);
+        await _parseOddsBatch(await client.getOddsForMultipleEvents({ eventIds: batch.join(','), bookmakers: ODDSAPIIO_BOOKMAKERS }), false, results);
       }
     } catch (err) {
       if (!err.message?.includes('aborted')) console.error(`[OddsAPI.io] ${sport.name}: ${err.message}`);
@@ -470,7 +470,7 @@ async function scanArbitrageBets() {
   if (!client) return results;
 
   try {
-    const data = await client.getArbitrageBets(ODDSAPIIO_BOOKMAKERS, { limit: 100, includeEventDetails: true });
+    const data = await client.getArbitrageBets({ bookmakers: ODDSAPIIO_BOOKMAKERS, limit: 100, includeEventDetails: true });
     if (!Array.isArray(data)) return results;
 
     for (const arb of data) {
