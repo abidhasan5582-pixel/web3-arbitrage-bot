@@ -5,6 +5,7 @@ const config = {
   telegramChatId: process.env.TELEGRAM_CHAT_ID || '',
   oddsApiKey: process.env.ODDS_API_KEY || '',
   oddsapiiApiKey: process.env.ODDSAPIIO_API_KEY || '',
+  oddsapiiBookmakers: process.env.ODDSAPIIO_BOOKMAKERS || 'DraftKings,FanDuel',
   sharpApiKey: process.env.SHARPAPI_API_KEY || '',
   openaiApiKey: process.env.OPENAI_API_KEY || '',
   puterApiKey: process.env.PUTER_API_KEY || '',

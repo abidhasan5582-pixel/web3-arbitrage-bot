@@ -1,5 +1,6 @@
 const config = require('./config');
 const { calculate2Way } = require('./arbitrage');
+const { OddsAPIClient } = require('./OddsAPIClient');
 
 const ESPN_SPORTS = [
   { slug: 'baseball/mlb', name: 'MLB' },
@@ -259,131 +260,70 @@ async function scanESPN() {
   return results;
 }
 
-// Odds API keys and sport-to-slug mapping
-const ODDS_API_BASE = 'https://api.the-odds-api.com/v4';
-const ODDS_API_SPORTS = [
-  { key: 'basketball_nba', name: 'NBA' },
-  { key: 'americanfootball_nfl', name: 'NFL' },
-  { key: 'baseball_mlb', name: 'MLB' },
-  { key: 'icehockey_nhl', name: 'NHL' },
-  { key: 'americanfootball_ncaaf', name: 'NCAAF' },
-  { key: 'basketball_ncaab', name: 'NCAAB' },
-  { key: 'soccer_epl', name: 'EPL' },
-  { key: 'soccer_esp_la_liga', name: 'La Liga' },
-  { key: 'soccer_italy_serie_a', name: 'Serie A' },
-  { key: 'soccer_germany_bundesliga', name: 'Bundesliga' },
-  { key: 'soccer_france_ligue_one', name: 'Ligue 1' },
-  { key: 'mma_mixed_martial_arts', name: 'MMA' },
-  { key: 'boxing_boxing', name: 'Boxing' },
-];
 
-async function scanOddsAPI() {
-  const results = [];
-  const apiKey = config.oddsApiKey;
-  if (!apiKey) return results;
 
-  for (const sport of ODDS_API_SPORTS) {
-    try {
-      const url = `${ODDS_API_BASE}/sports/${sport.key}/odds/?regions=us&markets=h2h&apiKey=${apiKey}`;
-      const res = await fetchWithTimeout(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-      if (!res.ok) {
-        if (res.status === 401 || res.status === 403) {
-          console.log(`[OddsAPI] ${sport.name}: invalid API key — skipping`);
-          return results;
-        }
-        continue;
-      }
-      const data = await res.json();
-      if (!Array.isArray(data)) continue;
-
-      for (const event of data) {
-        const homeName = event.home_team || 'Home';
-        const awayName = event.away_team || 'Away';
-        const normEvent = normalizeEventName(awayName, homeName);
-
-        for (const bookmaker of (event.bookmakers || [])) {
-          const platform = bookmaker.title || bookmaker.key || 'Unknown';
-          for (const market of (bookmaker.markets || [])) {
-            if (market.key !== 'h2h') continue;
-            const outcomes = market.outcomes || [];
-            const homeOutcome = outcomes.find(o => o.name === event.home_team);
-            const awayOutcome = outcomes.find(o => o.name === event.away_team);
-            if (!homeOutcome?.price || !awayOutcome?.price) continue;
-
-            results.push({
-              event: normEvent,
-              sport: sport.name,
-              home: homeName,
-              away: awayName,
-              platformA: platform,
-              oddsA: homeOutcome.price,
-              platformB: platform,
-              oddsB: awayOutcome.price,
-              source: 'oddsapi',
-              isLive: false,
-              commenceTime: event.commence_time || null,
-            });
-          }
-        }
-      }
-    } catch (err) {
-      if (!err.message?.includes('aborted')) {
-        console.error(`[OddsAPI] ${sport.name}: ${err.message}`);
-      }
-    }
-  }
-  return results;
-}
-
-const ODDSAPIIO_BASE = 'https://api.odds-api.io/v3';
 const ODDSAPIIO_SPORTS = [
-  { slug: 'baseball', name: 'MLB' },
-  { slug: 'american-football', name: 'NFL' },
-  { slug: 'basketball', name: 'NBA' },
-  { slug: 'ice-hockey', name: 'NHL' },
-  { slug: 'football', name: 'EPL' },
+  { slug: 'football', name: 'Football' },
+  { slug: 'basketball', name: 'Basketball' },
+  { slug: 'tennis', name: 'Tennis' },
+  { slug: 'baseball', name: 'Baseball' },
+  { slug: 'american-football', name: 'American Football' },
+  { slug: 'ice-hockey', name: 'Ice Hockey' },
+  { slug: 'esports', name: 'Esports' },
   { slug: 'mixed-martial-arts', name: 'MMA' },
+  { slug: 'boxing', name: 'Boxing' },
+  { slug: 'darts', name: 'Darts' },
+  { slug: 'handball', name: 'Handball' },
+  { slug: 'volleyball', name: 'Volleyball' },
+  { slug: 'snooker', name: 'Snooker' },
+  { slug: 'table-tennis', name: 'Table Tennis' },
+  { slug: 'rugby', name: 'Rugby' },
+  { slug: 'cricket', name: 'Cricket' },
+  { slug: 'futsal', name: 'Futsal' },
+  { slug: 'aussie-rules', name: 'Aussie Rules' },
+  { slug: 'badminton', name: 'Badminton' },
+  { slug: 'golf', name: 'Golf' },
+  { slug: 'cross-country', name: 'Cross Country' },
+  { slug: 'cycling', name: 'Cycling' },
+  { slug: 'athletics', name: 'Athletics' },
 ];
-const ODDSAPIIO_BOOKMAKERS = 'DraftKings,FanDuel';
+const ODDSAPIIO_BOOKMAKERS = config.oddsapiiBookmakers || 'DraftKings,FanDuel';
+
+let _oddsApiClient = null;
+function getOddsAPIClient() {
+  if (!_oddsApiClient && config.oddsapiiApiKey) {
+    _oddsApiClient = new OddsAPIClient(config.oddsapiiApiKey);
+  }
+  return _oddsApiClient;
+}
 
 async function scanOddsAPIio() {
   const results = [];
-  const apiKey = config.oddsapiiApiKey;
-  if (!apiKey) return results;
+  const client = getOddsAPIClient();
+  if (!client) return results;
 
-  // Fetch live events across all sports first (live game focus)
   try {
-    const liveUrl = `${ODDSAPIIO_BASE}/events/live?apiKey=${apiKey}`;
-    const liveRes = await fetchWithTimeout(liveUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    if (liveRes.ok) {
-      const liveData = await liveRes.json();
-      if (Array.isArray(liveData) && liveData.length > 0) {
-        const liveIds = liveData.map(e => e.id).filter(Boolean);
-        console.log(`[OddsAPI.io] ${liveIds.length} live events found`);
-        // Batch fetch odds for live events (10 per request)
-        for (let i = 0; i < liveIds.length; i += 10) {
-          const batch = liveIds.slice(i, i + 10);
-          await fetchOddsAPIIOBatch(batch, true, results, apiKey);
-        }
+    const liveData = await client.getLiveEvents();
+    if (Array.isArray(liveData) && liveData.length > 0) {
+      const liveIds = liveData.map(e => e.id).filter(Boolean);
+      console.log(`[OddsAPI.io] ${liveIds.length} live events found`);
+      for (let i = 0; i < liveIds.length; i += 10) {
+        const batch = liveIds.slice(i, i + 10);
+        await _parseOddsBatch(await client.getOddsForMultipleEvents(batch, ODDSAPIIO_BOOKMAKERS), true, results);
       }
     }
   } catch (err) {
-    if (!err.message?.includes('aborted')) console.error(`[OddsAPI.io] live: ${err.message}`);
+    if (!err.message?.includes('aborted') && !err.message?.includes('HTTP 401')) console.error(`[OddsAPI.io] live: ${err.message}`);
   }
 
-  // Then pending events per sport
   for (const sport of ODDSAPIIO_SPORTS) {
     try {
-      const url = `${ODDSAPIIO_BASE}/events?apiKey=${apiKey}&sport=${sport.slug}&status=pending&limit=50`;
-      const res = await fetchWithTimeout(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-      if (!res.ok) continue;
-      const data = await res.json();
-      if (!Array.isArray(data) || data.length === 0) continue;
-
-      const ids = data.map(e => e.id).filter(Boolean);
+      const events = await client.getEvents(sport.slug, { status: 'pending', limit: 50 });
+      if (!Array.isArray(events) || events.length === 0) continue;
+      const ids = events.map(e => e.id).filter(Boolean);
       for (let i = 0; i < ids.length; i += 10) {
         const batch = ids.slice(i, i + 10);
-        await fetchOddsAPIIOBatch(batch, false, results, apiKey);
+        await _parseOddsBatch(await client.getOddsForMultipleEvents(batch, ODDSAPIIO_BOOKMAKERS), false, results);
       }
     } catch (err) {
       if (!err.message?.includes('aborted')) console.error(`[OddsAPI.io] ${sport.name}: ${err.message}`);
@@ -392,49 +332,39 @@ async function scanOddsAPIio() {
   return results;
 }
 
-async function fetchOddsAPIIOBatch(eventIds, isLive, results, apiKey) {
-  try {
-    const url = `${ODDSAPIIO_BASE}/odds/multi?apiKey=${apiKey}&eventIds=${eventIds.join(',')}&bookmakers=${ODDSAPIIO_BOOKMAKERS}`;
-    const res = await fetchWithTimeout(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    if (!res.ok) return;
-    const data = await res.json();
-    if (!Array.isArray(data)) return;
+async function _parseOddsBatch(data, isLive, results) {
+  if (!Array.isArray(data)) return;
+  for (const event of data) {
+    if (!event.bookmakers || Object.keys(event.bookmakers).length === 0) continue;
+    const homeName = event.home || 'Home';
+    const awayName = event.away || 'Away';
+    const normEvent = normalizeEventName(awayName, homeName);
 
-    for (const event of data) {
-      if (!event.bookmakers || Object.keys(event.bookmakers).length === 0) continue;
-      const homeName = event.home || 'Home';
-      const awayName = event.away || 'Away';
-      const normEvent = normalizeEventName(awayName, homeName);
+    const sport = ODDSAPIIO_SPORTS.find(s => s.slug === event.sport?.slug);
+    const sportName = sport?.name || event.sport?.name || 'Unknown';
 
-      // Map sport name from event.sport.slug
-      const sport = ODDSAPIIO_SPORTS.find(s => s.slug === event.sport?.slug);
-      const sportName = sport?.name || event.sport?.name || 'Unknown';
+    for (const [bookmaker, markets] of Object.entries(event.bookmakers)) {
+      const ml = Array.isArray(markets) ? markets.find(m => m.name === 'ML') : null;
+      if (!ml?.odds?.[0]) continue;
+      const odds = ml.odds[0];
+      const homeOdds = parseFloat(odds.home);
+      const awayOdds = parseFloat(odds.away);
+      if (!homeOdds || !awayOdds || homeOdds <= 1 || awayOdds <= 1) continue;
 
-      for (const [bookmaker, markets] of Object.entries(event.bookmakers)) {
-        const ml = Array.isArray(markets) ? markets.find(m => m.name === 'ML') : null;
-        if (!ml?.odds?.[0]) continue;
-        const odds = ml.odds[0];
-        const homeOdds = parseFloat(odds.home);
-        const awayOdds = parseFloat(odds.away);
-        if (!homeOdds || !awayOdds || homeOdds <= 1 || awayOdds <= 1) continue;
-
-        results.push({
-          event: normEvent,
-          sport: sportName,
-          home: homeName,
-          away: awayName,
-          platformA: bookmaker,
-          oddsA: homeOdds,
-          platformB: bookmaker,
-          oddsB: awayOdds,
-          source: 'oddsapii',
-          isLive,
-          commenceTime: event.date || null,
-        });
-      }
+      results.push({
+        event: normEvent,
+        sport: sportName,
+        home: homeName,
+        away: awayName,
+        platformA: bookmaker,
+        oddsA: homeOdds,
+        platformB: bookmaker,
+        oddsB: awayOdds,
+        source: 'oddsapii',
+        isLive,
+        commenceTime: event.date || null,
+      });
     }
-  } catch (err) {
-    if (!err.message?.includes('aborted')) console.error(`[OddsAPI.io] batch: ${err.message}`);
   }
 }
 
@@ -530,20 +460,70 @@ async function scanSharpAPI() {
   return results;
 }
 
+async function scanArbitrageBets() {
+  const results = [];
+  const client = getOddsAPIClient();
+  if (!client) return results;
+
+  try {
+    const data = await client.getArbitrageBets(ODDSAPIIO_BOOKMAKERS, { limit: 100, includeEventDetails: true });
+    if (!Array.isArray(data)) return results;
+
+    for (const arb of data) {
+      if (!arb.event || !arb.legs || arb.legs.length < 2) continue;
+      if (arb.market?.name !== 'ML') continue;
+
+      const homeLeg = arb.legs.find(l => l.label === 'home');
+      const awayLeg = arb.legs.find(l => l.label === 'away');
+      if (!homeLeg || !awayLeg) continue;
+
+      const homeOdds = parseFloat(homeLeg.odds);
+      const awayOdds = parseFloat(awayLeg.odds);
+      if (!homeOdds || !awayOdds || homeOdds <= 1 || awayOdds <= 1) continue;
+
+      const roi = arb.profitMargin != null ? arb.profitMargin / 100 : null;
+
+      results.push({
+        event: normalizeEventName(arb.event.away, arb.event.home),
+        sport: arb.event.sport || 'Unknown',
+        home: arb.event.home,
+        away: arb.event.away,
+        platformA: homeLeg.bookmaker,
+        oddsA: homeOdds,
+        platformB: awayLeg.bookmaker,
+        oddsB: awayOdds,
+        source: 'oddsapii-arb',
+        isLive: false,
+        commenceTime: arb.event.date || null,
+        roi,
+      });
+    }
+
+    if (results.length > 0) {
+      console.log(`[ArbitrageBets] ${results.length} arb opportunities found`);
+    }
+  } catch (err) {
+    if (!err.message?.includes('aborted') && !err.message?.includes('HTTP 401')) {
+      console.log(`[ArbitrageBets] ${err.message}`);
+    }
+  }
+
+  return results;
+}
+
 async function scanAll() {
   const sources = [
     scanESPN(),
     scanPolymarket(),
     scanSXBet(),
     scanAzuro(),
-    scanOddsAPI(),
     scanOddsAPIio(),
     scanSharpAPI(),
   ];
   const results = await Promise.allSettled(sources);
 
   const combined = [];
-  const sourceLabels = ['ESPN', 'Polymarket', 'SX Bet', 'Azuro', 'OddsAPI', 'OddsAPI.io', 'SharpAPI'];
+  const sourceLabels = ['ESPN', 'Polymarket', 'SX Bet', 'Azuro', 'OddsAPI.io', 'SharpAPI'];
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
     if (r.status === 'fulfilled') {
@@ -774,4 +754,4 @@ function liveFilter(oddsData) {
   });
 }
 
-module.exports = { scanAll, scanPolymarket, scanSXBet, scanESPN, scanAzuro, scanOddsAPI, scanOddsAPIio, scanSharpAPI, liveFilter, scanScores, countLiveGames, normalizeEventName };
+module.exports = { scanAll, scanPolymarket, scanSXBet, scanESPN, scanAzuro, scanOddsAPIio, scanArbitrageBets, scanSharpAPI, liveFilter, scanScores, countLiveGames, normalizeEventName };

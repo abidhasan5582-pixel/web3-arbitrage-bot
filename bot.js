@@ -186,11 +186,20 @@ async function performScan(ctx, sportFilter) {
 
     const arbs = arbitrage.findArbitrages(oddsData);
     const internalArbs = arbitrage.findInternalArbs(oddsData);
+    // Fetch pre-computed arbs from Odds-API.io /arbitrage-bets endpoint
+    let apiArbs = [];
+    try {
+      apiArbs = await oddsFetcher.scanArbitrageBets();
+    } catch (_) {}
     // Merge and deduplicate by event+platforms
     const allArbs = [...arbs];
     for (const ia of internalArbs) {
       const dup = allArbs.find(a => a.event === ia.event && a.platformA === ia.platformA && a.platformB === ia.platformB);
       if (!dup) allArbs.push(ia);
+    }
+    for (const aa of apiArbs) {
+      const dup = allArbs.find(a => a.event === aa.event && a.platformA === aa.platformA && a.platformB === aa.platformB);
+      if (!dup) allArbs.push(aa);
     }
     allArbs.sort((a, b) => {
       if (a.isLive !== b.isLive) return a.isLive ? -1 : 1;
@@ -868,7 +877,6 @@ async function startBot() {
   console.log('Platform:', process.platform);
   console.log('PORT:', process.env.PORT || '3000');
   console.log('Chat ID configured:', config.telegramChatId ? 'YES' : 'NO');
-  console.log('Odds API:', config.oddsApiKey ? 'SET' : 'MISSING');
   console.log('OddsAPI.io:', config.oddsapiiApiKey ? 'SET' : 'MISSING');
   console.log('SharpAPI:', config.sharpApiKey ? 'SET' : 'MISSING');
   console.log('Bankroll: $' + config.bankroll);
