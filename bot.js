@@ -832,14 +832,22 @@ async function startBot() {
   console.log('Launching Telegram bot...');
   // Clear any stale polling sessions (409 Conflict fix)
   try {
-    await bot.telegram.callApi('getUpdates', { offset: 0, limit: 1, timeout: 1 });
-  } catch (_) { /* expected if no stale session */ }
+    await Promise.race([
+      bot.telegram.callApi('getUpdates', { offset: 0, limit: 1, timeout: 1 }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('getUpdates timeout')), 5000)),
+    ]);
+  } catch (_) { /* expected if no stale session or timeout */ }
   try {
-    await bot.launch();
+    await Promise.race([
+      bot.launch(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('bot.launch timeout')), 15000)),
+    ]);
     console.log('Bot started successfully');
   } catch (err) {
     if (err?.response?.error_code === 409) {
       console.warn('Telegram 409: another bot instance is polling (local session?). Continuing without Telegram.');
+    } else if (err.message?.includes('timeout')) {
+      console.warn('Telegram bot.launch timed out — continuing without Telegram. Bot may need a restart.');
     } else {
       throw err;
     }
