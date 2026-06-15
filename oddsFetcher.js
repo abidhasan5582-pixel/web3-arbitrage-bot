@@ -31,6 +31,10 @@ async function fetchWithTimeout(url, options = {}) {
   }
 }
 
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
 async function fetchPolymarketMarkets() {
   const res = await fetchWithTimeout(`${POLYMARKET_API}/markets?active=true&closed=false&limit=100`);
   if (!res.ok) throw new Error(`Polymarket: ${res.status}`);
@@ -356,22 +360,30 @@ async function scanSharpAPI() {
   if (!apiKey) return results;
   const baseUrl = 'https://api.sharpapi.io/api/v1';
 
+  // Free tier: 12 req/min, so we rate-limit to 1 req per 6s (10/min)
+  const RATE_DELAY_MS = 6000;
+
   for (const league of SHARPAPI_LEAGUES) {
     try {
       const url = `${baseUrl}/odds?league=${league.key}`;
       const res = await fetchWithTimeout(url, {
         headers: { 'X-API-Key': apiKey, 'User-Agent': 'Mozilla/5.0' },
       });
-      if (!res.ok) {
-        if (res.status === 401 || res.status === 403) {
-          console.log(`[SharpAPI] ${league.name}: invalid API key — skipping`);
-          return results;
-        }
+      const body = await res.json();
+
+      // Check for rate-limit or error in body
+      if (body?.error) {
+        console.log(`[SharpAPI] ${league.name}: ${body.error.code || 'error'} — ${body.error.message || ''}`);
+        // Rate limited — stop early to avoid wasting requests
+        if (body.error.code === 'rate_limited') break;
         continue;
       }
-      const body = await res.json();
+
       const selections = body?.data;
-      if (!Array.isArray(selections) || selections.length === 0) continue;
+      if (!Array.isArray(selections) || selections.length === 0) {
+        await sleep(RATE_DELAY_MS);
+        continue;
+      }
 
       // Group by (sportsbook, home_team, away_team)
       const groups = {};
@@ -404,6 +416,9 @@ async function scanSharpAPI() {
           commenceTime: null,
         });
       }
+
+      // Rate-limit delay between leagues
+      await sleep(RATE_DELAY_MS);
     } catch (err) {
       if (!err.message?.includes('aborted')) {
         console.error(`[SharpAPI] ${league.name}: ${err.message}`);
