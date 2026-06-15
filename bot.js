@@ -830,6 +830,23 @@ async function startBot() {
   if (savedDemoRate) config.demoExecutionRate = parseFloat(savedDemoRate);
 
   console.log('Launching Telegram bot...');
+  // Test Telegram API connectivity first
+  try {
+    const testRes = await fetch(`https://api.telegram.org/bot${config.telegramBotToken}/getMe`, {
+      signal: AbortSignal.timeout(8000),
+    });
+    const testData = await testRes.json();
+    if (!testData.ok) {
+      console.warn(`Telegram API check failed: ${testData.description || 'unknown error'}. Skipping Telegram.`);
+      console.warn('Health server is running — bot accessible via HTTP.');
+      return;
+    }
+    console.log(`Telegram API OK: @${testData.result.username}`);
+  } catch (err) {
+    console.warn(`Telegram API unreachable: ${err.message}. Skipping Telegram.`);
+    console.warn('Health server is running — bot accessible via HTTP.');
+    return;
+  }
   // Clear any stale polling sessions (409 Conflict fix)
   try {
     await Promise.race([
