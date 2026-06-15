@@ -279,16 +279,12 @@ const ODDS_API_SPORTS = [
 
 async function scanOddsAPI() {
   const results = [];
-  // Try ParlayAPI first if configured, then fallback to The Odds API
-  const parlayKey = process.env.PARLAYAPI_API_KEY || '';
-  const oddsKey = config.oddsApiKey;
-  const apiKey = parlayKey || oddsKey;
+  const apiKey = config.oddsApiKey;
   if (!apiKey) return results;
-  const baseUrl = parlayKey ? 'https://parlay-api.com/v1' : ODDS_API_BASE;
 
   for (const sport of ODDS_API_SPORTS) {
     try {
-      const url = `${baseUrl}/sports/${sport.key}/odds/?regions=us&markets=h2h&apiKey=${apiKey}`;
+      const url = `${ODDS_API_BASE}/sports/${sport.key}/odds/?regions=us&markets=h2h&apiKey=${apiKey}`;
       const res = await fetchWithTimeout(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
       if (!res.ok) {
         if (res.status === 401 || res.status === 403) {
@@ -324,6 +320,7 @@ async function scanOddsAPI() {
               platformB: platform,
               oddsB: awayOutcome.price,
               source: 'oddsapi',
+              isLive: false,
               commenceTime: event.commence_time || null,
             });
           }
@@ -336,6 +333,109 @@ async function scanOddsAPI() {
     }
   }
   return results;
+}
+
+const ODDSAPIIO_BASE = 'https://api.odds-api.io/v3';
+const ODDSAPIIO_SPORTS = [
+  { slug: 'baseball', name: 'MLB' },
+  { slug: 'american-football', name: 'NFL' },
+  { slug: 'basketball', name: 'NBA' },
+  { slug: 'ice-hockey', name: 'NHL' },
+  { slug: 'football', name: 'EPL' },
+  { slug: 'mixed-martial-arts', name: 'MMA' },
+];
+const ODDSAPIIO_BOOKMAKERS = 'DraftKings,FanDuel';
+
+async function scanOddsAPIio() {
+  const results = [];
+  const apiKey = config.oddsapiiApiKey;
+  if (!apiKey) return results;
+
+  // Fetch live events across all sports first (live game focus)
+  try {
+    const liveUrl = `${ODDSAPIIO_BASE}/events/live?apiKey=${apiKey}`;
+    const liveRes = await fetchWithTimeout(liveUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    if (liveRes.ok) {
+      const liveData = await liveRes.json();
+      if (Array.isArray(liveData) && liveData.length > 0) {
+        const liveIds = liveData.map(e => e.id).filter(Boolean);
+        console.log(`[OddsAPI.io] ${liveIds.length} live events found`);
+        // Batch fetch odds for live events (10 per request)
+        for (let i = 0; i < liveIds.length; i += 10) {
+          const batch = liveIds.slice(i, i + 10);
+          await fetchOddsAPIIOBatch(batch, true, results, apiKey);
+        }
+      }
+    }
+  } catch (err) {
+    if (!err.message?.includes('aborted')) console.error(`[OddsAPI.io] live: ${err.message}`);
+  }
+
+  // Then pending events per sport
+  for (const sport of ODDSAPIIO_SPORTS) {
+    try {
+      const url = `${ODDSAPIIO_BASE}/events?apiKey=${apiKey}&sport=${sport.slug}&status=pending&limit=50`;
+      const res = await fetchWithTimeout(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (!Array.isArray(data) || data.length === 0) continue;
+
+      const ids = data.map(e => e.id).filter(Boolean);
+      for (let i = 0; i < ids.length; i += 10) {
+        const batch = ids.slice(i, i + 10);
+        await fetchOddsAPIIOBatch(batch, false, results, apiKey);
+      }
+    } catch (err) {
+      if (!err.message?.includes('aborted')) console.error(`[OddsAPI.io] ${sport.name}: ${err.message}`);
+    }
+  }
+  return results;
+}
+
+async function fetchOddsAPIIOBatch(eventIds, isLive, results, apiKey) {
+  try {
+    const url = `${ODDSAPIIO_BASE}/odds/multi?apiKey=${apiKey}&eventIds=${eventIds.join(',')}&bookmakers=${ODDSAPIIO_BOOKMAKERS}`;
+    const res = await fetchWithTimeout(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!Array.isArray(data)) return;
+
+    for (const event of data) {
+      if (!event.bookmakers || Object.keys(event.bookmakers).length === 0) continue;
+      const homeName = event.home || 'Home';
+      const awayName = event.away || 'Away';
+      const normEvent = normalizeEventName(awayName, homeName);
+
+      // Map sport name from event.sport.slug
+      const sport = ODDSAPIIO_SPORTS.find(s => s.slug === event.sport?.slug);
+      const sportName = sport?.name || event.sport?.name || 'Unknown';
+
+      for (const [bookmaker, markets] of Object.entries(event.bookmakers)) {
+        const ml = Array.isArray(markets) ? markets.find(m => m.name === 'ML') : null;
+        if (!ml?.odds?.[0]) continue;
+        const odds = ml.odds[0];
+        const homeOdds = parseFloat(odds.home);
+        const awayOdds = parseFloat(odds.away);
+        if (!homeOdds || !awayOdds || homeOdds <= 1 || awayOdds <= 1) continue;
+
+        results.push({
+          event: normEvent,
+          sport: sportName,
+          home: homeName,
+          away: awayName,
+          platformA: bookmaker,
+          oddsA: homeOdds,
+          platformB: bookmaker,
+          oddsB: awayOdds,
+          source: 'oddsapii',
+          isLive,
+          commenceTime: event.date || null,
+        });
+      }
+    }
+  } catch (err) {
+    if (!err.message?.includes('aborted')) console.error(`[OddsAPI.io] batch: ${err.message}`);
+  }
 }
 
 const SHARPAPI_LEAGUES = [
@@ -437,12 +537,13 @@ async function scanAll() {
     scanSXBet(),
     scanAzuro(),
     scanOddsAPI(),
+    scanOddsAPIio(),
     scanSharpAPI(),
   ];
   const results = await Promise.allSettled(sources);
 
   const combined = [];
-  const sourceLabels = ['ESPN', 'Polymarket', 'SX Bet', 'Azuro', 'OddsAPI', 'SharpAPI'];
+  const sourceLabels = ['ESPN', 'Polymarket', 'SX Bet', 'Azuro', 'OddsAPI', 'OddsAPI.io', 'SharpAPI'];
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
     if (r.status === 'fulfilled') {
@@ -453,6 +554,16 @@ async function scanAll() {
     }
   }
   console.log(`[Scanner] ${combined.length} raw events before liveFilter`);
+
+  // Normalize isLive for all entries: if not set by scanner, compute from commenceTime
+  const now = Date.now();
+  for (const o of combined) {
+    if (o.isLive === undefined && o.commenceTime) {
+      const t = new Date(o.commenceTime).getTime();
+      o.isLive = t <= now && t >= now - 14400000; // started within last 4 hours
+    }
+  }
+
   return liveFilter(combined);
 }
 
@@ -656,10 +767,11 @@ function liveFilter(oddsData) {
   if (!liveOnly) return oddsData;
   const now = Math.floor(Date.now() / 1000);
   return oddsData.filter(o => {
+    if (o.isLive) return true;
     if (!o.commenceTime) return false;
     const t = new Date(o.commenceTime).getTime() / 1000;
     return t <= now + 7200 && t >= now - 7200;
   });
 }
 
-module.exports = { scanAll, scanPolymarket, scanSXBet, scanESPN, scanAzuro, scanOddsAPI, scanSharpAPI, liveFilter, scanScores, countLiveGames, normalizeEventName };
+module.exports = { scanAll, scanPolymarket, scanSXBet, scanESPN, scanAzuro, scanOddsAPI, scanOddsAPIio, scanSharpAPI, liveFilter, scanScores, countLiveGames, normalizeEventName };

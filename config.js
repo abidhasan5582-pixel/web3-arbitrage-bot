@@ -4,6 +4,7 @@ const config = {
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '',
   telegramChatId: process.env.TELEGRAM_CHAT_ID || '',
   oddsApiKey: process.env.ODDS_API_KEY || '',
+  oddsapiiApiKey: process.env.ODDSAPIIO_API_KEY || '',
   sharpApiKey: process.env.SHARPAPI_API_KEY || '',
   openaiApiKey: process.env.OPENAI_API_KEY || '',
   puterApiKey: process.env.PUTER_API_KEY || '',

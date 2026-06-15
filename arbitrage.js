@@ -143,6 +143,7 @@ function findInternalArbs(oddsList) {
           stakeB: result.stakeB,
           riskLevel: classifyRisk(result.roi),
           source: 'polymarket-internal',
+          isLive: !!entry.isLive,
         });
       }
     }
@@ -185,6 +186,7 @@ function findArbitrages(oddsList, is3Way = false) {
         stakeB: result.stakeB,
         riskLevel: classifyRisk(result.roi),
         source: oddsList[i].source,
+        isLive: !!(oddsList[i].isLive || oddsList[j].isLive),
       });
     }
   }

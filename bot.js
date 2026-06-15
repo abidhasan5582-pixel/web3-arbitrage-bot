@@ -40,8 +40,9 @@ function truncateMsg(msg, maxLen = 4000) {
 function formatArbMessage(arb, index) {
   const icons = { low: '🟢', medium: '🟡', high: '🔴' };
   const icon = icons[arb.riskLevel] || '⚪';
+  const liveTag = arb.isLive ? '🔴 LIVE ' : '';
 
-  let msg = `${icon} *Arb #${index} — ${arb.roi}% ROI*\n`;
+  let msg = `${icon} *${liveTag}Arb #${index} — ${arb.roi}% ROI*\n`;
   msg += `📅 *${arb.event}*\n`;
   msg += `🏠 ${arb.home} @ ${arb.oddsA} (${arb.platformA})\n`;
   msg += `✈️ ${arb.away} @ ${arb.oddsB} (${arb.platformB})\n`;
@@ -187,7 +188,10 @@ async function performScan(ctx, sportFilter) {
       const dup = allArbs.find(a => a.event === ia.event && a.platformA === ia.platformA && a.platformB === ia.platformB);
       if (!dup) allArbs.push(ia);
     }
-    allArbs.sort((a, b) => b.roi - a.roi);
+    allArbs.sort((a, b) => {
+      if (a.isLive !== b.isLive) return a.isLive ? -1 : 1;
+      return b.roi - a.roi;
+    });
 
     for (const arb of allArbs) {
       db.saveOpportunity(arb);
@@ -260,8 +264,9 @@ async function performScan(ctx, sportFilter) {
 
     if (config.alertsEnabled && allArbs.length > 0 && !ctx) {
       const topArb = allArbs[0];
+      const liveTag = topArb.isLive ? '🔴 LIVE ' : '';
       const alertMsg = `🚨 *ARB ALERT!*\n\n` +
-        `${topArb.event}\n` +
+        `${liveTag}${topArb.event}\n` +
         `${topArb.platformA}: ${topArb.oddsA} | ${topArb.platformB}: ${topArb.oddsB}\n` +
         `*ROI: ${topArb.roi}%* | Profit: ~$${topArb.profit?.toFixed(2)}\n` +
         `Risk: ${topArb.riskLevel.toUpperCase()}\n\n` +
@@ -797,7 +802,7 @@ async function startBot() {
   console.log('PORT:', process.env.PORT || '3000');
   console.log('Chat ID configured:', config.telegramChatId ? 'YES' : 'NO');
   console.log('Odds API:', config.oddsApiKey ? 'SET' : 'MISSING');
-  console.log('ParlayAPI:', process.env.PARLAYAPI_API_KEY ? 'SET' : 'MISSING');
+  console.log('OddsAPI.io:', config.oddsapiiApiKey ? 'SET' : 'MISSING');
   console.log('SharpAPI:', config.sharpApiKey ? 'SET' : 'MISSING');
   console.log('Bankroll: $' + config.bankroll);
 
