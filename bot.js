@@ -163,6 +163,7 @@ async function performScan(ctx, sportFilter) {
 
     let oddsData = await oddsFetcher.scanAll();
     liveGameCount = oddsFetcher.countLiveGames(oddsData);
+    console.log(`[Scan] ${oddsData.length} events after liveFilter (${liveGameCount} live)`);
 
     if (sportFilter) {
       const filter = sportFilter.toLowerCase();

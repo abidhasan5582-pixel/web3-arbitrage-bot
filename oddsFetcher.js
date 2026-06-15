@@ -262,11 +262,17 @@ async function scanAll() {
   ]);
 
   const combined = [];
-  for (const r of results) {
+  const sourceLabels = ['ESPN', 'Polymarket', 'SX Bet', 'Azuro'];
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
     if (r.status === 'fulfilled') {
       combined.push(...r.value);
+      console.log(`[Scanner] ${sourceLabels[i]}: ${r.value.length} events`);
+    } else {
+      console.log(`[Scanner] ${sourceLabels[i]}: FAILED — ${r.reason?.message || 'unknown error'}`);
     }
   }
+  console.log(`[Scanner] ${combined.length} raw events before liveFilter`);
   return liveFilter(combined);
 }
 
