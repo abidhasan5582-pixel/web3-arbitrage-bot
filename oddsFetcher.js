@@ -198,10 +198,13 @@ async function scanSXBet() {
         platformB: 'SX Bet',
         oddsB: awayOdds,
         source: 'sxbet',
+        marketId: market.id || market.marketHash,
       });
     }
   } catch (err) {
-    console.error(`[OddsFetcher] SX Bet: ${err.message}`, err.stack?.split('\n')[1]);
+    if (!err.message?.includes('404') && !err.message?.includes('400')) {
+      console.error(`[OddsFetcher] SX Bet: ${err.message}`, err.stack?.split('\n')[1]);
+    }
   }
 
   return results;
@@ -278,14 +281,16 @@ async function scanESPN() {
 }
 
 async function scanAll() {
-  const [sportsOdds, espnOdds, polymarketOdds, sxbetOdds] = await Promise.all([
+  const [sportsOdds, espnOdds, polymarketOdds, sxbetOdds, azuroOdds] = await Promise.all([
     scanAllSports(),
     scanESPN(),
     scanPolymarket(),
     scanSXBet(),
+    scanAzuro(),
   ]);
 
-  return [...sportsOdds, ...espnOdds, ...polymarketOdds, ...sxbetOdds];
+  const combined = [...sportsOdds, ...espnOdds, ...polymarketOdds, ...sxbetOdds, ...azuroOdds];
+  return liveFilter(combined);
 }
 
 async function scanScores() {
@@ -339,4 +344,80 @@ async function scanScores() {
   return results;
 }
 
-module.exports = { scanAll, scanAllSports, scanPolymarket, scanSXBet, scanESPN, scanScores };
+const AZURO_SUBGRAPH = 'https://api.thegraph.com/subgraphs/name/azuro-org/azuro-api-polygon';
+
+async function scanAzuro() {
+  const results = [];
+  try {
+    const query = `
+      query LiveConditions($first: Int) {
+        conditions(first: $first, where: { status_in: ["Pending", "Live"] }, orderBy: createdAt, orderDirection: desc) {
+          id
+          game
+          status
+          startsAt
+          outcomes {
+            id
+            name
+            odds
+          }
+          core {
+            sport
+            participants
+          }
+        }
+      }
+    `;
+    const resp = await fetch(AZURO_SUBGRAPH, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, variables: { first: 100 } }),
+    });
+    const { data } = await resp.json();
+    const conditions = data?.conditions || [];
+    for (const c of conditions) {
+      if (!c.outcomes || c.outcomes.length < 2) continue;
+      const homeOutcome = c.outcomes[0];
+      const awayOutcome = c.outcomes[1];
+      const homeOdds = parseInt(homeOutcome.odds) / 1e18;
+      const awayOdds = parseInt(awayOutcome.odds) / 1e18;
+      if (homeOdds <= 1 || awayOdds <= 1) continue;
+
+      const participants = c.core?.participants || [];
+      const homeName = participants[0] || homeOutcome.name || 'Home';
+      const awayName = participants[1] || 'Away';
+      const eventName = c.game || `${homeName} vs ${awayName}`;
+
+      results.push({
+        event: eventName,
+        sport: c.core?.sport || 'Azuro',
+        home: homeName,
+        away: awayName,
+        platformA: 'Azuro',
+        oddsA: homeOdds,
+        platformB: 'Azuro',
+        oddsB: awayOdds,
+        source: 'azuro',
+        conditionId: c.id,
+      });
+    }
+  } catch (err) {
+    if (!err.message?.includes('400') && !err.message?.includes('404')) {
+      console.error(`[OddsFetcher] Azuro: ${err.message}`, err.stack?.split('\n')[1]);
+    }
+  }
+  return results;
+}
+
+function liveFilter(oddsData) {
+  const liveOnly = config.liveOnly;
+  if (!liveOnly) return oddsData;
+  const now = Math.floor(Date.now() / 1000);
+  return oddsData.filter(o => {
+    if (!o.commenceTime) return false;
+    const t = new Date(o.commenceTime).getTime() / 1000;
+    return t <= now + 7200 && t >= now - 7200;
+  });
+}
+
+module.exports = { scanAll, scanAllSports, scanPolymarket, scanSXBet, scanESPN, scanAzuro, liveFilter, scanScores };

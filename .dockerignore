@@ -1,10 +1,6 @@
 node_modules
-npm-debug.log
 .git
-.gitignore
 .env
-.env.example
-arbitrage.db
-.opencode
-*.md
-.DS_Store
+*.db
+*.sqlite
+test_arb_bot.db

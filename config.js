@@ -17,6 +17,25 @@ const config = {
   alertsEnabled: process.env.ALERTS_ENABLED !== 'false',
   maxBetPercent: 0.05,
 
+  // Live trading
+  liveMode: process.env.LIVE_MODE === 'true',
+  liveOnly: process.env.LIVE_ONLY !== 'false',
+  liveScanInterval: (parseInt(process.env.LIVE_SCAN_INTERVAL) || 15) * 1000,
+  liveSlippageTolerance: (parseFloat(process.env.LIVE_SLIPPAGE_TOLERANCE) || 2) / 100,
+  liveMinROI: (parseFloat(process.env.LIVE_MIN_ROI) || 5) / 100,
+  executablePlatforms: (process.env.EXECUTABLE_PLATFORMS || 'polymarket,sxbet,azuro').split(',').map(s => s.trim()),
+
+  // Wallet keys
+  polyPrivateKey: process.env.POLY_PRIVATE_KEY || '',
+  polyRpcUrl: process.env.POLY_RPC_URL || 'https://polygon-rpc.com',
+  sxPrivateKey: process.env.SX_PRIVATE_KEY || '',
+  sxRpcUrl: process.env.SX_RPC_URL || 'https://api.sx.bet',
+
+  // Gas/fee simulation (demo)
+  demoGasCostPoly: parseFloat(process.env.DEMO_GAS_COST_POLY) || 0.03,
+  demoGasCostSol: parseFloat(process.env.DEMO_GAS_COST_SOL) || 0.001,
+  demoPlatformFeePct: (parseFloat(process.env.DEMO_PLATFORM_FEE_PCT) || 0.5) / 100,
+
   get aiAvailable() {
     return !!(this.openaiApiKey || this.puterApiKey);
   },
@@ -26,6 +45,15 @@ const config = {
     if (!this.telegramBotToken) missing.push('TELEGRAM_BOT_TOKEN');
     if (!this.telegramChatId) missing.push('TELEGRAM_CHAT_ID');
     if (!this.oddsApiKey) missing.push('ODDS_API_KEY');
+    return missing;
+  },
+
+  validateLive() {
+    const missing = [];
+    if (this.liveMode) {
+      if (!this.polyPrivateKey) missing.push('POLY_PRIVATE_KEY');
+      if (!this.sxPrivateKey) missing.push('SX_PRIVATE_KEY');
+    }
     return missing;
   }
 };

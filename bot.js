@@ -5,6 +5,8 @@ const db = require('./database');
 const oddsFetcher = require('./oddsFetcher');
 const arbitrage = require('./arbitrage');
 const ai = require('./aiAnalyzer');
+const exchange = require('./exchange');
+const risk = require('./risk');
 
 const bot = new Telegraf(config.telegramBotToken);
 let scanCount = 0;
@@ -130,62 +132,47 @@ async function performScan(ctx, sportFilter) {
       db.saveOpportunity(arb);
     }
 
-    let demoExecuted = 0;
-    let demoProfitTotal = 0;
+    let executedCount = 0;
+    let executionProfitTotal = 0;
     let openedTrades = [];
-    if (config.demoMode && arbs.length > 0) {
+    if ((config.demoMode || config.liveMode) && arbs.length > 0) {
       const bestPerEvent = {};
       for (const arb of arbs) {
-        if (arb.riskLevel === 'high' || arb.roi < config.minArbROI * 100) continue;
+        const assessed = risk.assessArbRisk(arb);
+        if (!assessed.recommended) continue;
         const key = arb.event;
-        if (!bestPerEvent[key] || arb.roi > bestPerEvent[key].roi) {
-          bestPerEvent[key] = arb;
+        if (!bestPerEvent[key] || assessed.netROI > bestPerEvent[key].netROI) {
+          bestPerEvent[key] = assessed;
         }
       }
       const uniqueArbs = Object.values(bestPerEvent);
       for (const arb of uniqueArbs) {
-        if (Math.random() > config.demoExecutionRate) continue;
-        const stake = config.bankroll * config.maxBetPercent;
-        const arbProfit = (stake * arb.roi) / 100;
-        db.openDemoTrade({
-          event: arb.event,
-          sport: arb.sport,
-          home: arb.home || '',
-          away: arb.away || '',
-          platformA: arb.platformA,
-          oddsA: arb.oddsA,
-          stakeA: arb.stakeA || (stake / 2),
-          platformB: arb.platformB,
-          oddsB: arb.oddsB,
-          stakeB: arb.stakeB || (stake / 2),
-          expectedProfit: arbProfit,
-          expectedRoi: arb.roi,
-          profit: arbProfit,
-          roi: arb.roi,
-          source: arb.source,
-          commenceTime: arb.commenceTime,
-        });
-        demoExecuted++;
-        demoProfitTotal += arbProfit;
-        openedTrades.push(arb);
+        if (!config.liveMode && Math.random() > config.demoExecutionRate) continue;
+        if (!risk.canExecute(arb)) continue;
+        const result = await exchange.executeArb(arb, arb);
+        if (result.success) {
+          executedCount++;
+          executionProfitTotal += result.totalProfit;
+          openedTrades.push({ ...arb, result });
+          console.log(`[${config.liveMode ? 'LIVE' : 'Demo'}] Executed: ${arb.event} | P&L: $${result.totalProfit.toFixed(4)}`);
+        }
       }
-      if (demoExecuted > 0) {
+      if (executedCount > 0 && !config.liveMode) {
         const today = new Date().toISOString().split('T')[0];
         db.updateDemoStats(today, {
-          profit: demoProfitTotal,
-          trades: demoExecuted,
-          wins: demoProfitTotal > 0 ? demoExecuted : 0,
-          losses: demoProfitTotal <= 0 ? demoExecuted : 0,
+          profit: executionProfitTotal,
+          trades: executedCount,
+          wins: executionProfitTotal > 0 ? executedCount : 0,
+          losses: executionProfitTotal <= 0 ? executedCount : 0,
           bestRoi: Math.max(...arbs.map(a => a.roi)),
         });
-        console.log(`[Demo] Opened ${demoExecuted} trades, est. P&L: $${demoProfitTotal.toFixed(2)}`);
       }
     }
 
     const today = new Date().toISOString().split('T')[0];
     db.updateDailyStats(today, {
       arbsFound: arbs.length,
-      arbsExecuted: demoExecuted,
+      arbsExecuted: executedCount,
       bestRoi: arbs.length > 0 ? Math.max(...arbs.map(a => a.roi)) : 0,
     });
 
@@ -193,8 +180,9 @@ async function performScan(ctx, sportFilter) {
       if (arbs.length === 0) {
         await ctx.reply('✅ Scan complete. No arbitrage opportunities found this round.');
       } else {
-        if (config.demoMode && demoExecuted > 0) {
-          await ctx.reply(`🎮 *Demo: ${demoExecuted} trades executed!*\nEstimated P&L: $${demoProfitTotal.toFixed(2)}`, { parse_mode: 'Markdown' });
+        if (executedCount > 0) {
+          const mode = config.liveMode ? '🚀 *Live' : '🎮 *Demo';
+          await ctx.reply(`${mode}: ${executedCount} trades executed!*\nEstimated P&L: $${executionProfitTotal.toFixed(2)}`, { parse_mode: 'Markdown' });
         }
         let msg = `🎯 *Found ${arbs.length} arbitrage opportunities!*\n\n`;
         const topArbs = arbs.slice(0, 5);
@@ -223,11 +211,10 @@ async function performScan(ctx, sportFilter) {
         console.error('Alert send failed:', err.message);
       }
 
-      if (config.demoMode && openedTrades.length > 0) {
+      if (openedTrades.length > 0) {
         for (const arb of openedTrades) {
-          const stake = config.bankroll * config.maxBetPercent;
-          const arbProfit = (stake * arb.roi) / 100;
-          const openMsg = `🎮 *Demo Trade OPEN*\n\n📅 ${arb.event}\n🏠 ${arb.platformA} @ ${arb.oddsA}\n✈️ ${arb.platformB} @ ${arb.oddsB}\n💰 Stake: $${stake.toFixed(2)}\n📈 Est. Profit: $${arbProfit.toFixed(4)} (${arb.roi}%)`;
+          const mode = config.liveMode ? '🚀 *LIVE Trade' : '🎮 *Demo Trade';
+          const openMsg = `${mode} OPEN*\n\n📅 ${arb.event}\n🏠 ${arb.platformA} @ ${arb.oddsA}\n✈️ ${arb.platformB} @ ${arb.oddsB}\n💰 P&L: $${(arb.result?.totalProfit || 0).toFixed(4)} (${arb.roi}%)`;
           try {
             await bot.telegram.sendMessage(config.telegramChatId, openMsg, { parse_mode: 'Markdown' });
             await new Promise(r => setTimeout(r, 500));
@@ -265,6 +252,7 @@ bot.start(async (ctx) => {
     `• /strategy — AI daily strategy\n` +
     `• /auto on — Start auto-scanning\n` +
     `• /demo — Demo trading mode & P&L\n` +
+    `• /live — Live trading mode & positions\n` +
     `• /positions — View open demo trades\n` +
     `• /trades — View recent demo trades\n` +
     `• /help — All commands\n\n` +
@@ -299,7 +287,10 @@ bot.help(async (ctx) => {
     `/demo on/off — Toggle demo mode\n` +
     `/demo rate 0.3 — Set execution rate\n` +
     `/positions — View open positions\n` +
-    `/trades — View closed trades`;
+    `/trades — View closed trades\n\n` +
+    `*Live Trading*\n` +
+    `/live — Show live trading status & positions\n` +
+    `/live on/off — Toggle live mode`;
 
   await ctx.reply(helpMsg, { parse_mode: 'Markdown' });
 });
@@ -621,6 +612,54 @@ bot.command('positions', async (ctx) => {
   await ctx.reply(truncateMsg(msg), { parse_mode: 'Markdown' });
 });
 
+bot.command('live', async (ctx) => {
+  const args = ctx.message.text.split(' ').slice(1);
+  const sub = args[0]?.toLowerCase();
+
+  if (sub === 'on') {
+    config.liveMode = true;
+    db.saveSetting('live_mode', 'true');
+    await exchange.init();
+    await ctx.reply('🚀 Live mode enabled. Arbs will be executed on-chain.');
+    return;
+  }
+  if (sub === 'off') {
+    config.liveMode = false;
+    db.saveSetting('live_mode', 'false');
+    exchange.disconnectSXWebSocket();
+    await ctx.reply('🔴 Live mode disabled.');
+    return;
+  }
+
+  const realSummary = db.getRealTradeSummary();
+  const gasCheck = await exchange.hasGas().catch(() => ({}));
+  let gasMsg = '';
+  for (const [platform, ok] of Object.entries(gasCheck)) {
+    gasMsg += `${ok ? '✅' : '❌'} ${platform}\n`;
+  }
+
+  const msg =
+    `🚀 *Live Trading*\n\n` +
+    `Status: ${config.liveMode ? '🟢 ON' : '🔴 OFF'}\n` +
+    `Live Only: ${config.liveOnly ? 'YES' : 'NO'}\n` +
+    `Scan Interval: ${config.liveScanInterval / 1000}s\n` +
+    `Min ROI: ${(config.liveMinROI * 100).toFixed(0)}%\n` +
+    `Slippage Tol: ${(config.liveSlippageTolerance * 100).toFixed(0)}%\n\n` +
+    `*Gas / Funds:*\n${gasMsg || 'No exchanges initialized'}\n\n` +
+    `*Real Trades:*\n` +
+    `Open: ${realSummary.open_count || 0}\n` +
+    `Closed: ${realSummary.closed_count || 0}\n` +
+    `Total P&L: $${(realSummary.total_profit || 0).toFixed(2)}\n` +
+    `Avg ROI: ${(realSummary.avg_roi || 0).toFixed(2)}%\n` +
+    `Today: ${realSummary.today_trades || 0} trades | $${(realSummary.today_profit || 0).toFixed(2)}\n\n` +
+    `*Commands:*\n` +
+    `• /live on/off — Toggle live trading\n` +
+    `• /trades — View trades\n` +
+    `• /positions — View open trades`;
+
+  await ctx.reply(msg, { parse_mode: 'Markdown' });
+});
+
 // Health check endpoint for Railway
 const server = http.createServer((req, res) => {
   if (req.url === '/health') {
@@ -711,14 +750,22 @@ if (require.main === module) {
 
 module.exports = { startBot, bot };
 
-process.once('SIGINT', () => {
+async function gracefulShutdown(signal) {
+  console.log(`\n[Bot] Received ${signal}, shutting down gracefully...`);
   if (autoScanTimer) clearInterval(autoScanTimer);
-  db.close();
-  bot.stop('SIGINT');
-});
+  try { server.close(); } catch (_) {}
+  try { exchange.disconnectSXWebSocket(); } catch (_) {}
+  try { db.close(); } catch (_) {}
+  try { await bot.stop(signal); } catch (_) {}
+  console.log('[Bot] Shutdown complete.');
+  process.exit(0);
+}
 
-process.once('SIGTERM', () => {
-  if (autoScanTimer) clearInterval(autoScanTimer);
-  db.close();
-  bot.stop('SIGTERM');
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('uncaughtException', (err) => {
+  console.error('[Bot] Uncaught exception:', err.message, err.stack?.split('\n').slice(0, 3).join('\n'));
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[Bot] Unhandled rejection:', reason?.message || reason);
 });

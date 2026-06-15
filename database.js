@@ -113,6 +113,27 @@ async function initDatabase() {
     )
   `);
 
+  db.run(`
+    CREATE TABLE IF NOT EXISTS real_trades (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      arb_id TEXT,
+      event TEXT NOT NULL,
+      platform TEXT NOT NULL,
+      market_id TEXT,
+      side TEXT NOT NULL,
+      odds REAL NOT NULL,
+      stake REAL NOT NULL,
+      status TEXT DEFAULT 'pending',
+      tx_hash TEXT,
+      order_id TEXT,
+      error TEXT,
+      profit REAL DEFAULT 0,
+      roi REAL DEFAULT 0,
+      opened_at TEXT DEFAULT (datetime('now')),
+      closed_at TEXT
+    )
+  `);
+
   saveDb();
   return db;
 }
@@ -371,6 +392,75 @@ module.exports = {
     runSql('DELETE FROM bets WHERE is_demo = 1');
     runSql('DELETE FROM demo_stats');
     runSql('DELETE FROM demo_trades');
+  },
+
+  openRealTrade(trade) {
+    runSql(`INSERT INTO real_trades (arb_id, event, platform, market_id, side, odds, stake, status, tx_hash, order_id, error)
+      VALUES ($arbId, $event, $platform, $marketId, $side, $odds, $stake, $status, $txHash, $orderId, $error)`, {
+      $arbId: trade.arbId || null,
+      $event: trade.event,
+      $platform: trade.platform,
+      $marketId: trade.marketId || null,
+      $side: trade.side,
+      $odds: trade.odds,
+      $stake: trade.stake,
+      $status: trade.status || 'open',
+      $txHash: trade.txHash || null,
+      $orderId: trade.orderId || null,
+      $error: trade.error || null,
+    });
+  },
+
+  closeRealTrade(id, actualProfit, actualRoi) {
+    runSql("UPDATE real_trades SET status='closed', profit=$profit, roi=$roi, closed_at=datetime('now') WHERE id=$id", {
+      $id: id,
+      $profit: actualProfit,
+      $roi: actualRoi,
+    });
+  },
+
+  updateRealTrade(id, updates) {
+    const fields = [];
+    const params = { $id: id };
+    if (updates.status !== undefined) { fields.push('status=$status'); params.$status = updates.status; }
+    if (updates.txHash !== undefined) { fields.push('tx_hash=$txHash'); params.$txHash = updates.txHash; }
+    if (updates.orderId !== undefined) { fields.push('order_id=$orderId'); params.$orderId = updates.orderId; }
+    if (updates.error !== undefined) { fields.push('error=$error'); params.$error = updates.error; }
+    if (updates.profit !== undefined) { fields.push('profit=$profit'); params.$profit = updates.profit; }
+    if (updates.roi !== undefined) { fields.push('roi=$roi'); params.$roi = updates.roi; }
+    if (fields.length === 0) return;
+    runSql(`UPDATE real_trades SET ${fields.join(', ')} WHERE id=$id`, params);
+  },
+
+  getOpenRealTrades() {
+    return queryAll("SELECT * FROM real_trades WHERE status IN ('pending', 'open') ORDER BY opened_at ASC");
+  },
+
+  getClosedRealTrades(limit = 20) {
+    return queryAll('SELECT * FROM real_trades WHERE status=\'closed\' ORDER BY closed_at DESC LIMIT $limit', { $limit: limit });
+  },
+
+  getAllRealTrades(limit = 20) {
+    return queryAll('SELECT * FROM real_trades ORDER BY opened_at DESC LIMIT $limit', { $limit: limit });
+  },
+
+  getRealTradeSummary() {
+    const open = queryOne("SELECT COUNT(*) as count, COALESCE(SUM(stake), 0) as total_staked FROM real_trades WHERE status IN ('pending', 'open')");
+    const closed = queryOne("SELECT COUNT(*) as count, COALESCE(SUM(profit), 0) as total_profit, COALESCE(SUM(stake), 0) as total_staked, COALESCE(AVG(roi), 0) as avg_roi FROM real_trades WHERE status='closed'");
+    const today = queryOne("SELECT COUNT(*) as today_trades, COALESCE(SUM(profit), 0) as today_profit FROM real_trades WHERE status='closed' AND date(closed_at) = date('now')");
+    return {
+      open_count: open?.count || 0,
+      total_staked: open?.total_staked || 0,
+      closed_count: closed?.count || 0,
+      total_profit: closed?.total_profit || 0,
+      avg_roi: closed?.avg_roi || 0,
+      today_trades: today?.today_trades || 0,
+      today_profit: today?.today_profit || 0,
+    };
+  },
+
+  clearRealData() {
+    runSql('DELETE FROM real_trades');
   },
 
   close() {

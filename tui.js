@@ -3,6 +3,8 @@ const config = require('./config');
 const arb = require('./arbitrage');
 const db = require('./database');
 const odds = require('./oddsFetcher');
+const exchange = require('./exchange');
+const risk = require('./risk');
 
 let botModule;
 try { botModule = require('./bot'); } catch (_) {}
@@ -19,6 +21,7 @@ async function startTUI() {
   let botRunning = false;
   let scanCount = 0;
   let showPositions = false;
+  let showLivePositions = false;
   let autoScanEnabled = false;
   let autoScanInterval = config.scanInterval || 60000;
   let nextScanTime = 0;
@@ -26,10 +29,14 @@ async function startTUI() {
   let headerTimer = null;
   let settingsMode = false;
   let settingsSelected = 0;
+  let platformFilter = '';
   const settingsFields = [
     { name: 'Min ROI (%)', key: 'minROI', value: config.minArbROI * 100, step: 0.1, min: 0, max: 50 },
     { name: 'Max Bet (%)', key: 'maxBetPct', value: config.maxBetPercent * 100, step: 1, min: 1, max: 100 },
     { name: 'Demo Mode', key: 'demoMode', value: config.demoMode, type: 'toggle' },
+    { name: 'Live Mode', key: 'liveMode', value: config.liveMode, type: 'toggle' },
+    { name: 'Scan Speed (s)', key: 'scanSpeed', value: config.scanInterval / 1000, step: 5, min: 5, max: 300 },
+    { name: 'Platform Filter', key: 'platformFilter', value: '', type: 'string' },
   ];
 
   const logLines = [];
@@ -40,6 +47,7 @@ async function startTUI() {
     tags: true,
     style: { fg: 'white', bg: 'blue' },
   });
+  screen.append(header);
 
   const arbsBox = blessed.box({
     top: 4, left: 0, width: '60%', bottom: '30%+1',
@@ -52,6 +60,7 @@ async function startTUI() {
     border: { type: 'line', fg: 'cyan' },
     label: ' Arbs ',
   });
+  screen.append(arbsBox);
 
   const positionsBox = blessed.box({
     top: 4, right: 0, width: '40%', bottom: '30%+1',
@@ -62,9 +71,24 @@ async function startTUI() {
     scrollbar: { ch: '│', fg: 'yellow' },
     style: { fg: 'white', bg: 'black' },
     border: { type: 'line', fg: 'yellow' },
-    label: ' Positions ',
+    label: ' Demo Positions ',
     hidden: true,
   });
+  screen.append(positionsBox);
+
+  const livePositionsBox = blessed.box({
+    top: 4, right: 0, width: '40%', bottom: '30%+1',
+    content: '',
+    tags: true,
+    scrollable: true,
+    alwaysScroll: true,
+    scrollbar: { ch: '│', fg: 'magenta' },
+    style: { fg: 'white', bg: 'black' },
+    border: { type: 'line', fg: 'magenta' },
+    label: ' Live Positions ',
+    hidden: true,
+  });
+  screen.append(livePositionsBox);
 
   const logBox = blessed.box({
     bottom: 1, left: 0, width: '100%', height: '30%',
@@ -77,6 +101,7 @@ async function startTUI() {
     border: { type: 'line', fg: 'cyan' },
     label: ' Log ',
   });
+  screen.append(logBox);
 
   const helpBox = blessed.box({
     bottom: 0, left: 0, width: '100%', height: 1,
@@ -84,6 +109,7 @@ async function startTUI() {
     tags: true,
     style: { fg: 'cyan', bg: 'blue' },
   });
+  screen.append(helpBox);
 
   const settingsBox = blessed.box({
     top: 'center', left: 'center',
@@ -97,6 +123,7 @@ async function startTUI() {
     keys: false,
     vi: false,
   });
+  screen.append(settingsBox);
 
   function log(msg) {
     const time = new Date().toLocaleTimeString();
@@ -114,26 +141,32 @@ async function startTUI() {
     const botStatus = botRunning ? '{green-fg}BOT{/green-fg}' : '{yellow-fg}BOT OFF{/yellow-fg}';
     const missing = config.validate();
     const demo = db.getDemoSummary();
+    const real = db.getRealTradeSummary();
     const demoStatus = config.demoMode ? '{green-fg}DEMO{/green-fg}' : '{yellow-fg}DEMO OFF{/yellow-fg}';
+    const liveStatus = config.liveMode ? '{magenta-fg}LIVE{/magenta-fg}' : '';
     const demoProfit = (demo.total_profit || 0) >= 0
       ? '{green-fg}+$' + (demo.total_profit || 0).toFixed(2) + '{/green-fg}'
       : '{red-fg}-$' + Math.abs(demo.total_profit || 0).toFixed(2) + '{/red-fg}';
     const autoStatus = autoScanEnabled
       ? `{cyan-fg}AUTO ${Math.max(0, Math.round((nextScanTime - Date.now()) / 1000))}s{/cyan-fg}`
       : '';
+    const platformInfo = platformFilter ? `{yellow-fg}${platformFilter}{/yellow-fg}` : '';
     header.setContent([
-      `{bold}Web3 Sports Arbitrage Scanner{/bold}    $${config.bankroll}  |  ${botStatus}  |  ${demoStatus}  |  ${autoStatus}  |  Scan: ${scanCount}`,
-      `ROI: ${(config.minArbROI * 100).toFixed(1)}%  |  Bet: $${(config.bankroll * config.maxBetPercent).toFixed(2)}  |  Tg: ${missing.length === 0 ? '{green-fg}✓{/green-fg}' : '{red-fg}✗{/red-fg}'}`,
+      `{bold}Web3 Sports Arbitrage Scanner{/bold}    $${config.bankroll}  |  ${botStatus}  |  ${demoStatus}  |  ${liveStatus}  |  ${autoStatus}  |  Scan: ${scanCount}  ${platformInfo}`,
+      `ROI: ${(config.minArbROI * 100).toFixed(1)}%  |  Bet: $${(config.bankroll * config.maxBetPercent).toFixed(2)}  |  Speed: ${autoScanInterval / 1000}s  |  Tg: ${missing.length === 0 ? '{green-fg}✓{/green-fg}' : '{red-fg}✗{/red-fg}'}`,
       `Demo: ${demo.open_count || 0} open | ${demo.closed_count || 0} closed | ${demoProfit}`,
+      `Live: ${real.open_count || 0} open | ${real.closed_count || 0} closed | P&L: $${(real.total_profit || 0).toFixed(2)}`,
     ].join('\n'));
     screen.render();
   }
 
   function updateHelp() {
-    const mode = showPositions ? ' POSITIONS ' : ' ARBS ';
+    let mode = ' ARBS ';
+    if (showPositions) mode = ' DEMO ';
+    if (showLivePositions) mode = ' LIVE ';
     const autoLabel = autoScanEnabled ? '{bold}a{/bold} stop' : '{bold}a{/bold} auto';
     helpBox.setContent(
-      ` {bold}r{/bold} scan  {bold}b{/bold} bot  {bold}p{/bold}${mode} ${autoLabel}  {bold}d{/bold} data  {bold}c{/bold} clear  {bold}s{/bold} set  {bold}q{/bold} quit`
+      ` {bold}r{/bold} scan  {bold}b{/bold} bot  {bold}p{/bold}${mode} {bold}l{/bold}live ${autoLabel}  {bold}d{/bold} data  {bold}c{/bold} clear  {bold}s{/bold} set  {bold}q{/bold} quit`
     );
     screen.render();
   }
@@ -207,17 +240,74 @@ async function startTUI() {
     screen.render();
   }
 
+  function renderLivePositions() {
+    const open = db.getOpenRealTrades();
+    const closed = db.getClosedRealTrades(5);
+    const summary = db.getRealTradeSummary();
+    let content = '{bold}Live Positions{/bold}\n\n';
+
+    content += `Total P&L: $${(summary.total_profit || 0).toFixed(2)}\n`;
+    content += `Open: ${summary.open_count || 0} | Closed: ${summary.closed_count || 0}\n\n`;
+
+    if (open.length === 0) {
+      content += '{yellow-fg}No open live positions{/yellow-fg}\n';
+    } else {
+      content += '{bold}Open:{/bold}\n';
+      open.slice(0, 8).forEach((t, i) => {
+        const event = (t.event || '').substring(0, 13).padEnd(13);
+        const stake = t.stake || 0;
+        const side = t.side || '';
+        content += `${i + 1}. ${event} ${side} $${stake.toFixed(2)}\n`;
+      });
+    }
+
+    content += '\n{bold}Closed (last 5){/bold}\n\n';
+    if (closed.length === 0) {
+      content += '{yellow-fg}None yet{/yellow-fg}\n';
+    } else {
+      closed.slice(0, 5).forEach((t, i) => {
+        const event = (t.event || '').substring(0, 13).padEnd(13);
+        const color = t.profit >= 0 ? 'green' : 'red';
+        content += `${i + 1}. ${event} {${color}-fg}$${t.profit.toFixed(4)}{/} (${t.roi.toFixed(1)}%)\n`;
+      });
+    }
+
+    livePositionsBox.setContent(content);
+    screen.render();
+  }
+
   function togglePanel() {
-    showPositions = !showPositions;
-    arbsBox.hidden = showPositions;
+    if (showPositions) {
+      showPositions = false;
+      showLivePositions = true;
+    } else if (showLivePositions) {
+      showLivePositions = false;
+    } else {
+      showPositions = true;
+    }
+    arbsBox.hidden = showPositions || showLivePositions;
     positionsBox.hidden = !showPositions;
+    livePositionsBox.hidden = !showLivePositions;
     if (showPositions) renderPositions();
+    if (showLivePositions) renderLivePositions();
+    updateHelp();
+    screen.render();
+  }
+
+  function toggleLivePanel() {
+    showLivePositions = !showLivePositions;
+    arbsBox.hidden = showPositions || showLivePositions;
+    positionsBox.hidden = !showPositions;
+    livePositionsBox.hidden = !showLivePositions;
+    if (showLivePositions) renderLivePositions();
     updateHelp();
     screen.render();
   }
 
   function getActiveBox() {
-    return showPositions ? positionsBox : arbsBox;
+    if (showLivePositions) return livePositionsBox;
+    if (showPositions) return positionsBox;
+    return arbsBox;
   }
 
   function scrollActiveBox(dir) {
@@ -246,6 +336,8 @@ async function startTUI() {
       let val;
       if (f.type === 'toggle') {
         val = f.value ? '{green-fg}ON{/green-fg}' : '{red-fg}OFF{/red-fg}';
+      } else if (f.type === 'string') {
+        val = f.value || '(all)';
       } else {
         val = f.value.toFixed(f.step >= 1 ? 0 : 1);
       }
@@ -263,6 +355,9 @@ async function startTUI() {
     settingsFields[0].value = config.minArbROI * 100;
     settingsFields[1].value = config.maxBetPercent * 100;
     settingsFields[2].value = config.demoMode;
+    settingsFields[3].value = config.liveMode;
+    settingsFields[4].value = config.scanInterval / 1000;
+    settingsFields[5].value = platformFilter;
     renderSettings();
   }
 
@@ -276,7 +371,10 @@ async function startTUI() {
     config.minArbROI = settingsFields[0].value / 100;
     config.maxBetPercent = settingsFields[1].value / 100;
     config.demoMode = settingsFields[2].value;
-    log(`{green-fg}Settings saved: ROI ${(config.minArbROI * 100).toFixed(1)}%, Bet ${(config.maxBetPercent * 100).toFixed(0)}%, Demo ${config.demoMode ? 'ON' : 'OFF'}{/green-fg}`);
+    config.liveMode = settingsFields[3].value;
+    autoScanInterval = settingsFields[4].value * 1000;
+    platformFilter = settingsFields[5].value || '';
+    log(`{green-fg}Settings saved: ROI ${(config.minArbROI * 100).toFixed(1)}%, Bet ${(config.maxBetPercent * 100).toFixed(0)}%, Demo ${config.demoMode ? 'ON' : 'OFF'}, Live ${config.liveMode ? 'ON' : 'OFF'}, Speed ${autoScanInterval / 1000}s, Filter "${platformFilter || 'all'}"{/green-fg}`);
     hideSettings();
     updateHeader();
     updateHelp();
@@ -329,10 +427,33 @@ async function startTUI() {
     screen.render();
 
     try {
-      const allData = await odds.scanAll();
-      const oddsData = Array.isArray(allData) ? allData : [];
+      let allData = await odds.scanAll();
+      let oddsData = Array.isArray(allData) ? allData : [];
+
+      if (platformFilter) {
+        const filter = platformFilter.toLowerCase();
+        oddsData = oddsData.filter(o =>
+          o.platformA?.toLowerCase().includes(filter) ||
+          o.platformB?.toLowerCase().includes(filter) ||
+          o.sport?.toLowerCase().includes(filter)
+        );
+      }
+
       log(`Fetched ${oddsData.length} odds entries`);
       const detected = arb.findArbitrages(oddsData);
+
+      if ((config.demoMode || config.liveMode) && detected.length > 0) {
+        const best = risk.selectBestArbs(detected, 3);
+        for (const a of best) {
+          if (risk.canExecute(a)) {
+            const result = await exchange.executeArb(a, a);
+            if (result.success) {
+              log(`{green-fg}Executed: ${a.event} — $${result.totalProfit.toFixed(4)} ROI{/green-fg}`);
+            }
+          }
+        }
+      }
+
       log(`Found ${detected.length} arbitrage opportunities`);
       detected.slice(0, 5).forEach(a => {
         log(`${a.riskLevel.toUpperCase()} ${a.platformA}/${a.platformB}: ${a.event} — ${a.roi.toFixed(2)}%`);
@@ -342,9 +463,14 @@ async function startTUI() {
       if (config.demoMode && demo.open_count > 0) {
         log(`{bold}🎮 ${demo.open_count} open demo trades{/bold}`);
       }
+      const real = db.getRealTradeSummary();
+      if (config.liveMode && real.open_count > 0) {
+        log(`{bold}🚀 ${real.open_count} open live trades{/bold}`);
+      }
 
       renderArbs(detected, ` Arbitrage (${detected.length} found) `);
       renderPositions();
+      renderLivePositions();
       updateHeader();
     } catch (err) {
       log(`{red-fg}Scan error: ${err.message}{/red-fg}`);
@@ -407,6 +533,11 @@ async function startTUI() {
   screen.key(['p'], () => {
     if (settingsMode) return;
     togglePanel();
+  });
+
+  screen.key(['l'], () => {
+    if (settingsMode) return;
+    toggleLivePanel();
   });
 
   screen.key(['a'], () => {
@@ -533,6 +664,13 @@ async function startTUI() {
     if (autoScanEnabled) updateHeader();
   }, 1000);
 }
+
+process.on('uncaughtException', (err) => {
+  console.error('[TUI] Uncaught exception:', err.message);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[TUI] Unhandled rejection:', reason?.message || reason);
+});
 
 startTUI().catch(err => {
   console.error('TUI Error:', err);
