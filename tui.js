@@ -23,6 +23,7 @@ async function startTUI() {
   let showPositions = false;
   let showLivePositions = false;
   let autoScanEnabled = false;
+  let liveGameCount = 0;
   let autoScanInterval = config.scanInterval || 60000;
   let nextScanTime = 0;
   let autoScanTimer = null;
@@ -150,9 +151,10 @@ async function startTUI() {
     const autoStatus = autoScanEnabled
       ? `{cyan-fg}AUTO ${Math.max(0, Math.round((nextScanTime - Date.now()) / 1000))}s{/cyan-fg}`
       : '';
+    const liveInfo = liveGameCount > 0 ? `{red-fg}●${liveGameCount}LIVE{/red-fg}` : '';
     const platformInfo = platformFilter ? `{yellow-fg}${platformFilter}{/yellow-fg}` : '';
     header.setContent([
-      `{bold}Web3 Sports Arbitrage Scanner{/bold}    $${config.bankroll}  |  ${botStatus}  |  ${demoStatus}  |  ${liveStatus}  |  ${autoStatus}  |  Scan: ${scanCount}  ${platformInfo}`,
+      `{bold}Web3 Sports Arbitrage Scanner{/bold}    $${config.bankroll}  |  ${botStatus}  |  ${demoStatus}  |  ${liveStatus}  |  ${autoStatus}  ${liveInfo} |  Scan: ${scanCount}  ${platformInfo}`,
       `ROI: ${(config.minArbROI * 100).toFixed(1)}%  |  Bet: $${(config.bankroll * config.maxBetPercent).toFixed(2)}  |  Speed: ${autoScanInterval / 1000}s  |  Tg: ${missing.length === 0 ? '{green-fg}✓{/green-fg}' : '{red-fg}✗{/red-fg}'}`,
       `Demo: ${demo.open_count || 0} open | ${demo.closed_count || 0} settled | ${demoProfit}`,
       `Live: ${real.open_count || 0} open | ${real.closed_count || 0} settled | P&L: $${(real.total_profit || 0).toFixed(2)}`,
@@ -391,8 +393,9 @@ async function startTUI() {
       if (!autoScanEnabled) return;
       if (Date.now() >= nextScanTime) {
         doScan().then(() => {
-          nextScanTime = Date.now() + autoScanInterval;
-          if (autoScanEnabled) autoScanTimer = setTimeout(tick, autoScanInterval);
+          const interval = liveGameCount > 0 ? 15000 : (autoScanInterval || config.scanInterval);
+          nextScanTime = Date.now() + interval;
+          if (autoScanEnabled) autoScanTimer = setTimeout(tick, interval);
         });
         return;
       }
@@ -440,6 +443,7 @@ async function startTUI() {
       }
 
       log(`Fetched ${oddsData.length} odds entries`);
+      liveGameCount = odds.countLiveGames(oddsData);
       const detected = arb.findArbitrages(oddsData);
 
       if ((config.demoMode || config.liveMode) && detected.length > 0) {

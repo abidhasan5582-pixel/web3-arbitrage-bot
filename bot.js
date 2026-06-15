@@ -12,6 +12,8 @@ const bot = new Telegraf(config.telegramBotToken);
 let scanCount = 0;
 let startTime = Date.now();
 let autoScanTimer = null;
+let autoScanEnabled = false;
+let liveGameCount = 0;
 let settlementTimer = null;
 let isScanning = false;
 const rateLimitMap = new Map();
@@ -145,6 +147,7 @@ async function performScan(ctx, sportFilter) {
     if (ctx) await ctx.reply('🔍 Scanning odds across all sports...');
 
     let oddsData = await oddsFetcher.scanAll();
+    liveGameCount = oddsFetcher.countLiveGames(oddsData);
 
     if (sportFilter) {
       const filter = sportFilter.toLowerCase();
@@ -211,8 +214,9 @@ async function performScan(ctx, sportFilter) {
     });
 
     if (ctx) {
+      const liveInfo = liveGameCount > 0 ? ` 🔴 ${liveGameCount} live games` : '';
       if (arbs.length === 0) {
-        await ctx.reply('✅ Scan complete. No arbitrage opportunities found this round.');
+        await ctx.reply(`✅ Scan complete. No arbitrage opportunities found this round.${liveInfo}`);
       } else {
         if (executedCount > 0) {
           const mode = config.liveMode ? '🚀 *Live' : '🎮 *Demo';
@@ -288,6 +292,18 @@ function startSettlementLoop() {
     }
   }, interval);
   console.log(`[Settlement] Loop started (${interval / 1000}s interval)`);
+}
+
+function scheduleNextScan() {
+  if (!autoScanEnabled) return;
+  const interval = liveGameCount > 0 ? 15000 : config.scanInterval;
+  autoScanTimer = setTimeout(async () => {
+    await performScan(null);
+    if (autoScanEnabled) scheduleNextScan();
+  }, interval);
+  if (autoScanEnabled) {
+    console.log(`[AutoScan] Next scan in ${interval / 1000}s (live games: ${liveGameCount})`);
+  }
 }
 
 // Chat ID authorization middleware
@@ -497,17 +513,19 @@ bot.command('auto', async (ctx) => {
       await ctx.reply('Auto-scan is already running.');
       return;
     }
-    autoScanTimer = setInterval(() => performScan(null), config.scanInterval);
+    autoScanEnabled = true;
+    scheduleNextScan();
     performScan(null);
-    await ctx.reply(`▶️ Auto-scan started (every ${config.scanInterval / 1000}s). New arbs will be alerted automatically.`);
+    await ctx.reply(`▶️ Auto-scan started. Live games adjust interval dynamically.`);
   } else if (state === 'off') {
     if (autoScanTimer) {
-      clearInterval(autoScanTimer);
+      clearTimeout(autoScanTimer);
       autoScanTimer = null;
     }
+    autoScanEnabled = false;
     await ctx.reply('⏹ Auto-scan stopped.');
   } else {
-    await ctx.reply(`Auto-scan is currently ${autoScanTimer ? 'RUNNING' : 'STOPPED'}. Use /auto on or /auto off.`);
+    await ctx.reply(`Auto-scan is currently ${autoScanEnabled ? 'RUNNING' : 'STOPPED'}. Use /auto on or /auto off.`);
   }
 });
 
@@ -522,7 +540,8 @@ bot.command('settings', async (ctx) => {
     `Alerts: ${config.alertsEnabled ? 'ON' : 'OFF'}\n` +
     `Auto-Scan: ${autoScanTimer ? 'RUNNING' : 'STOPPED'}\n` +
     `Demo Mode: ${config.demoMode ? 'ON' : 'OFF'}\n` +
-    `Demo Rate: ${(config.demoExecutionRate * 100).toFixed(0)}%`,
+    `Demo Rate: ${(config.demoExecutionRate * 100).toFixed(0)}%\n` +
+    `Live Games: ${liveGameCount || 0}`,
     { parse_mode: 'Markdown' }
   );
 });
@@ -575,8 +594,9 @@ bot.command('status', async (ctx) => {
     `🎯 Latest Arb: ${recentArbs.length > 0 ? `${recentArbs[0].roi}% ROI` : 'None yet'}\n` +
     `📝 Total Bets Logged: ${bets.length > 0 ? bets[0].id : 0}\n` +
     `🔔 Alerts: ${config.alertsEnabled ? 'ON' : 'OFF'}\n` +
-    `🔄 Auto-Scan: ${autoScanTimer ? 'RUNNING' : 'STOPPED'}\n` +
+    `🔄 Auto-Scan: ${autoScanEnabled ? 'RUNNING' : 'STOPPED'}\n` +
     `🎮 Demo Mode: ${config.demoMode ? 'ON' : 'OFF'}\n` +
+    `🔴 Live Games: ${liveGameCount || 0}\n` +
     `🔁 Settlement: ${settlementTimer ? 'RUNNING' : 'STOPPED'}\n` +
     `📊 Demo: ${demoSummary.open_count || 0} open | ${demoSummary.closed_count || 0} settled | P&L: $${(demoSummary.total_profit || 0).toFixed(2)}\n` +
     `📊 Real: ${realSummary.open_count || 0} open | ${realSummary.closed_count || 0} settled | P&L: $${(realSummary.total_profit || 0).toFixed(2)}`,
@@ -822,8 +842,9 @@ module.exports = { startBot, bot };
 
 async function gracefulShutdown(signal) {
   console.log(`\n[Bot] Received ${signal}, shutting down gracefully...`);
-  if (autoScanTimer) clearInterval(autoScanTimer);
-  if (settlementTimer) clearInterval(settlementTimer);
+  autoScanEnabled = false;
+  if (autoScanTimer) { clearTimeout(autoScanTimer); autoScanTimer = null; }
+  if (settlementTimer) { clearInterval(settlementTimer); settlementTimer = null; }
   try { server.close(); } catch (_) {}
   try { exchange.disconnectSXWebSocket(); } catch (_) {}
   try { db.close(); } catch (_) {}

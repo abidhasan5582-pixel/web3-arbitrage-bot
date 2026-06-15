@@ -1,21 +1,11 @@
 const config = require('./config');
 
-const SPORTS = [
-  { key: 'basketball_nba', name: 'NBA' },
-  { key: 'basketball_ncaab', name: 'NCAAB' },
-  { key: 'americanfootball_nfl', name: 'NFL' },
-  { key: 'americanfootball_ncaaf', name: 'NCAAF' },
-  { key: 'soccer_epl', name: 'EPL' },
-  { key: 'soccer_uefa_champions_league', name: 'UCL' },
-  { key: 'soccer_spain_la_liga', name: 'La Liga' },
-  { key: 'soccer_italy_serie_a', name: 'Serie A' },
-  { key: 'soccer_germany_bundesliga', name: 'Bundesliga' },
-  { key: 'tennis_atp', name: 'ATP Tennis' },
-  { key: 'tennis_wta', name: 'WTA Tennis' },
-  { key: 'ice_nhl', name: 'NHL' },
-  { key: 'baseball_mlb', name: 'MLB' },
-  { key: 'mma_mixed_martial_arts', name: 'UFC' },
-];
+const OVERTIME_SPORTS = {
+  10: 'NFL', 11: 'NCAAF', 20: 'NBA', 21: 'NCAAB',
+  30: 'MLB', 40: 'NHL', 50: 'UEFA', 60: 'EPL',
+  61: 'La Liga', 62: 'Serie A', 63: 'Bundesliga', 64: 'Ligue 1',
+  70: 'MLS', 80: 'UFC', 90: 'WNBA', 100: 'Tennis',
+};
 
 const ESPN_SPORTS = [
   { slug: 'baseball/mlb', name: 'MLB' },
@@ -31,7 +21,7 @@ const ESPN_SPORTS = [
   { slug: 'soccer/fra.1', name: 'Ligue 1' },
 ];
 
-const ODDS_API_BASE = 'https://api.the-odds-api.com/v4';
+const OVERTIME_API = 'https://api.overtime.io/overtime-v2';
 const POLYMARKET_API = 'https://clob.polymarket.com';
 const SXBET_API = 'https://api.sx.bet';
 
@@ -48,13 +38,6 @@ async function fetchWithTimeout(url, options = {}) {
   }
 }
 
-async function fetchOddsPapi(sport) {
-  const url = `${ODDS_API_BASE}/sports/${sport}/odds/?apiKey=${config.oddsApiKey}&regions=us,eu,uk&markets=h2h&oddsFormat=decimal`;
-  const res = await fetchWithTimeout(url);
-  if (!res.ok) throw new Error(`OddsPapi ${sport}: ${res.status}`);
-  return res.json();
-}
-
 async function fetchPolymarketMarkets() {
   const res = await fetchWithTimeout(`${POLYMARKET_API}/markets?tag=sports&limit=50`);
   if (!res.ok) throw new Error(`Polymarket: ${res.status}`);
@@ -67,70 +50,55 @@ async function fetchSXBetMarkets() {
   return res.json();
 }
 
-async function scanAllSports() {
+async function scanOvertime() {
   const results = [];
 
-  for (const sport of SPORTS) {
+  const networks = [42161, 10, 8453];
+
+  for (const networkId of networks) {
     try {
-      const data = await fetchOddsPapi(sport.key);
-      if (Array.isArray(data)) {
-        for (const event of data) {
-          if (!event.bookmakers || event.bookmakers.length < 2) continue;
+      const prematchRes = await fetchWithTimeout(`${OVERTIME_API}/markets?network=${networkId}`);
+      if (!prematchRes.ok) continue;
+      const prematchData = await prematchRes.json();
+      const prematchMarkets = Array.isArray(prematchData) ? prematchData : prematchData.markets || [];
 
-          const outcomes = event.bookmakers[0]?.markets?.[0]?.outcomes;
-          if (!outcomes || outcomes.length < 2) continue;
+      const liveRes = await fetchWithTimeout(`${OVERTIME_API}/live-markets?network=${networkId}`);
+      const liveData = liveRes.ok ? await liveRes.json() : { markets: [] };
+      const liveMarkets = Array.isArray(liveData) ? liveData : liveData.markets || [];
 
-          const homeName = outcomes[0].name;
-          const awayName = outcomes[1].name;
+      const allMarkets = [...prematchMarkets, ...liveMarkets];
 
-          const oddsByOutcome = {};
-          for (const book of event.bookmakers) {
-            const outcomes = book.markets?.[0]?.outcomes;
-            if (!outcomes || outcomes.length < 2) continue;
+      for (const m of allMarkets) {
+        const sportName = OVERTIME_SPORTS[m.subLeagueId] || OVERTIME_SPORTS[m.leagueId] || m.sport || 'Unknown';
+        const homeName = m.homeTeam || 'Home';
+        const awayName = m.awayTeam || 'Away';
+        const eventName = m.game || `${homeName} vs ${awayName}`;
 
-            for (let i = 0; i < outcomes.length; i++) {
-              const name = outcomes[i].name;
-              if (!oddsByOutcome[name]) oddsByOutcome[name] = [];
-              oddsByOutcome[name].push({
-                book: book.title,
-                odds: outcomes[i].price,
-              });
-            }
-          }
+        if (!m.odds || m.odds.length < 2) continue;
 
-          const outcomeNames = Object.keys(oddsByOutcome);
-          if (outcomeNames.length < 2) continue;
+        const homeDec = m.odds[0]?.decimal || (m.odds[0]?.normalizedImplied > 0 ? 1 / m.odds[0].normalizedImplied : 0);
+        const awayDec = m.odds[1]?.decimal || (m.odds[1]?.normalizedImplied > 0 ? 1 / m.odds[1].normalizedImplied : 0);
 
-          for (let i = 0; i < outcomeNames.length; i++) {
-            for (let j = i + 1; j < outcomeNames.length; j++) {
-              for (const a of oddsByOutcome[outcomeNames[i]]) {
-                for (const b of oddsByOutcome[outcomeNames[j]]) {
-                  if (a.book === b.book) continue;
-                  results.push({
-                    event: event.home_team
-                      ? `${event.home_team} vs ${event.away_team}`
-                      : event.sport_title,
-                    sport: sport.name,
-                    home: outcomeNames[i],
-                    away: outcomeNames[j],
-                    platformA: a.book,
-                    oddsA: a.odds,
-                    platformB: b.book,
-                    oddsB: b.odds,
-                    source: 'oddspapi',
-                    commenceTime: event.commence_time,
-                  });
-                }
-              }
-            }
-          }
-        }
+        if (homeDec <= 1 || awayDec <= 1) continue;
+
+        results.push({
+          event: eventName,
+          sport: sportName,
+          home: homeName,
+          away: awayName,
+          platformA: 'Overtime',
+          oddsA: homeDec,
+          platformB: 'Overtime',
+          oddsB: awayDec,
+          source: 'overtime',
+          commenceTime: m.maturity ? new Date(m.maturity * 1000).toISOString() : null,
+          isLive: m.live || liveMarkets.includes(m) || m.status === 'Live',
+          marketId: m.gameId,
+        });
       }
     } catch (err) {
-      if (err.message?.includes('404')) {
-        // sport not available on free tier — skip silently
-      } else {
-        console.error(`[OddsFetcher] ${sport.name}: ${err.message}`, err.stack?.split('\n')[1]);
+      if (!err.message?.includes('400') && !err.message?.includes('401')) {
+        console.error(`[OddsFetcher] Overtime (net ${networkId}): ${err.message}`);
       }
     }
   }
@@ -281,60 +249,26 @@ async function scanESPN() {
 }
 
 async function scanAll() {
-  const [sportsOdds, espnOdds, polymarketOdds, sxbetOdds, azuroOdds] = await Promise.all([
-    scanAllSports(),
+  const [overtimeOdds, espnOdds, polymarketOdds, sxbetOdds, azuroOdds] = await Promise.all([
+    scanOvertime(),
     scanESPN(),
     scanPolymarket(),
     scanSXBet(),
     scanAzuro(),
   ]);
 
-  const combined = [...sportsOdds, ...espnOdds, ...polymarketOdds, ...sxbetOdds, ...azuroOdds];
+  const combined = [...overtimeOdds, ...espnOdds, ...polymarketOdds, ...sxbetOdds, ...azuroOdds];
   return liveFilter(combined);
 }
 
-async function scanScoresOddsApi() {
-  const results = [];
-  if (!config.oddsApiKey) return results;
-
-  for (const sport of SPORTS) {
-    try {
-      const url = `${ODDS_API_BASE}/sports/${sport.key}/scores/?apiKey=${config.oddsApiKey}&daysFrom=2`;
-      const res = await fetchWithTimeout(url);
-      if (!res.ok) continue;
-      const data = await res.json();
-      if (!Array.isArray(data)) continue;
-
-      for (const event of data) {
-        if (!event.completed) continue;
-        const scores = event.scores;
-        if (!scores || scores.length < 2) continue;
-
-        const homeScore = parseInt(scores.find(s => s.name === event.home_team)?.score ?? 0);
-        const awayScore = parseInt(scores.find(s => s.name === event.away_team)?.score ?? 0);
-        const winner = homeScore > awayScore ? 'home' : 'away';
-        const evName = event.home_team && event.away_team
-          ? `${event.home_team} vs ${event.away_team}`
-          : event.sport_title;
-
-        results.push({
-          event: evName,
-          sport: sport.name,
-          home: event.home_team || 'Home',
-          away: event.away_team || 'Away',
-          homeScore,
-          awayScore,
-          winner,
-          winnerName: winner === 'home' ? event.home_team : event.away_team,
-          completed: true,
-          commenceTime: event.commence_time,
-          source: 'oddspapi',
-        });
-      }
-    } catch (_) {}
-  }
-
-  return results;
+function countLiveGames(oddsData) {
+  const now = Math.floor(Date.now() / 1000);
+  return oddsData.filter(o => {
+    if (o.isLive) return true;
+    if (!o.commenceTime) return false;
+    const t = new Date(o.commenceTime).getTime() / 1000;
+    return t <= now && t >= now - 14400;
+  }).length;
 }
 
 async function _scanScoresESPN() {
@@ -389,17 +323,7 @@ async function _scanScoresESPN() {
 }
 
 async function scanScores() {
-  const [espn, oddsApi] = await Promise.all([
-    _scanScoresESPN(),
-    scanScoresOddsApi(),
-  ]);
-  const seen = new Set();
-  const merged = [];
-  for (const s of [...espn, ...oddsApi]) {
-    const key = `${s.event}|${s.home}|${s.away}`;
-    if (!seen.has(key)) { seen.add(key); merged.push(s); }
-  }
-  return merged;
+  return _scanScoresESPN();
 }
 
 const AZURO_SUBGRAPH = 'https://api.thegraph.com/subgraphs/name/azuro-org/azuro-api-polygon';
@@ -478,4 +402,4 @@ function liveFilter(oddsData) {
   });
 }
 
-module.exports = { scanAll, scanAllSports, scanPolymarket, scanSXBet, scanESPN, scanAzuro, liveFilter, scanScores, scanScoresOddsApi };
+module.exports = { scanAll, scanOvertime, scanPolymarket, scanSXBet, scanESPN, scanAzuro, liveFilter, scanScores, countLiveGames };

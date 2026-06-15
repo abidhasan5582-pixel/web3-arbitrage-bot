@@ -44,7 +44,6 @@ const config = {
     const missing = [];
     if (!this.telegramBotToken) missing.push('TELEGRAM_BOT_TOKEN');
     if (!this.telegramChatId) missing.push('TELEGRAM_CHAT_ID');
-    if (!this.oddsApiKey) missing.push('ODDS_API_KEY');
     return missing;
   },
 
