@@ -37,6 +37,7 @@ async function startTUI() {
     { name: 'Demo Mode', key: 'demoMode', value: config.demoMode, type: 'toggle' },
     { name: 'Live Mode', key: 'liveMode', value: config.liveMode, type: 'toggle' },
     { name: 'Scan Speed (s)', key: 'scanSpeed', value: config.scanInterval / 1000, step: 5, min: 5, max: 300 },
+    { name: 'Live Only', key: 'liveOnly', value: config.liveOnly, type: 'toggle' },
     { name: 'Platform Filter', key: 'platformFilter', value: '', type: 'string' },
   ];
 
@@ -375,8 +376,9 @@ async function startTUI() {
     config.demoMode = settingsFields[2].value;
     config.liveMode = settingsFields[3].value;
     autoScanInterval = settingsFields[4].value * 1000;
-    platformFilter = settingsFields[5].value || '';
-    log(`{green-fg}Settings saved: ROI ${(config.minArbROI * 100).toFixed(1)}%, Bet ${(config.maxBetPercent * 100).toFixed(0)}%, Demo ${config.demoMode ? 'ON' : 'OFF'}, Live ${config.liveMode ? 'ON' : 'OFF'}, Speed ${autoScanInterval / 1000}s, Filter "${platformFilter || 'all'}"{/green-fg}`);
+    config.liveOnly = settingsFields[5].value;
+    platformFilter = settingsFields[6].value || '';
+    log(`{green-fg}Settings saved: ROI ${(config.minArbROI * 100).toFixed(1)}%, Bet ${(config.maxBetPercent * 100).toFixed(0)}%, Demo ${config.demoMode ? 'ON' : 'OFF'}, Live ${config.liveMode ? 'ON' : 'OFF'}, Speed ${autoScanInterval / 1000}s, LiveOnly ${config.liveOnly ? 'ON' : 'OFF'}, Filter "${platformFilter || 'all'}"{/green-fg}`);
     hideSettings();
     updateHeader();
     updateHelp();

@@ -1,12 +1,5 @@
 const config = require('./config');
 
-const OVERTIME_SPORTS = {
-  10: 'NFL', 11: 'NCAAF', 20: 'NBA', 21: 'NCAAB',
-  30: 'MLB', 40: 'NHL', 50: 'UEFA', 60: 'EPL',
-  61: 'La Liga', 62: 'Serie A', 63: 'Bundesliga', 64: 'Ligue 1',
-  70: 'MLS', 80: 'UFC', 90: 'WNBA', 100: 'Tennis',
-};
-
 const ESPN_SPORTS = [
   { slug: 'baseball/mlb', name: 'MLB' },
   { slug: 'basketball/nba', name: 'NBA' },
@@ -21,8 +14,7 @@ const ESPN_SPORTS = [
   { slug: 'soccer/fra.1', name: 'Ligue 1' },
 ];
 
-const OVERTIME_API = 'https://api.overtime.io/overtime-v2';
-const POLYMARKET_API = 'https://clob.polymarket.com';
+const POLYMARKET_API = 'https://gamma-api.polymarket.com';
 const SXBET_API = 'https://api.sx.bet';
 
 const FETCH_TIMEOUT = 15000;
@@ -39,71 +31,24 @@ async function fetchWithTimeout(url, options = {}) {
 }
 
 async function fetchPolymarketMarkets() {
-  const res = await fetchWithTimeout(`${POLYMARKET_API}/markets?tag=sports&limit=50`);
+  const res = await fetchWithTimeout(`${POLYMARKET_API}/markets?active=true&closed=false&limit=100`);
   if (!res.ok) throw new Error(`Polymarket: ${res.status}`);
   return res.json();
 }
 
-async function fetchSXBetMarkets() {
-  const res = await fetchWithTimeout(`${SXBET_API}/markets/active`);
-  if (!res.ok) throw new Error(`SX Bet: ${res.status}`);
-  return res.json();
-}
 
-async function scanOvertime() {
-  const results = [];
 
-  const networks = [42161, 10, 8453];
-
-  for (const networkId of networks) {
-    try {
-      const prematchRes = await fetchWithTimeout(`${OVERTIME_API}/markets?network=${networkId}`);
-      if (!prematchRes.ok) continue;
-      const prematchData = await prematchRes.json();
-      const prematchMarkets = Array.isArray(prematchData) ? prematchData : prematchData.markets || [];
-
-      const liveRes = await fetchWithTimeout(`${OVERTIME_API}/live-markets?network=${networkId}`);
-      const liveData = liveRes.ok ? await liveRes.json() : { markets: [] };
-      const liveMarkets = Array.isArray(liveData) ? liveData : liveData.markets || [];
-
-      const allMarkets = [...prematchMarkets, ...liveMarkets];
-
-      for (const m of allMarkets) {
-        const sportName = OVERTIME_SPORTS[m.subLeagueId] || OVERTIME_SPORTS[m.leagueId] || m.sport || 'Unknown';
-        const homeName = m.homeTeam || 'Home';
-        const awayName = m.awayTeam || 'Away';
-        const eventName = m.game || `${homeName} vs ${awayName}`;
-
-        if (!m.odds || m.odds.length < 2) continue;
-
-        const homeDec = m.odds[0]?.decimal || (m.odds[0]?.normalizedImplied > 0 ? 1 / m.odds[0].normalizedImplied : 0);
-        const awayDec = m.odds[1]?.decimal || (m.odds[1]?.normalizedImplied > 0 ? 1 / m.odds[1].normalizedImplied : 0);
-
-        if (homeDec <= 1 || awayDec <= 1) continue;
-
-        results.push({
-          event: eventName,
-          sport: sportName,
-          home: homeName,
-          away: awayName,
-          platformA: 'Overtime',
-          oddsA: homeDec,
-          platformB: 'Overtime',
-          oddsB: awayDec,
-          source: 'overtime',
-          commenceTime: m.maturity ? new Date(m.maturity * 1000).toISOString() : null,
-          isLive: m.live || liveMarkets.includes(m) || m.status === 'Live',
-          marketId: m.gameId,
-        });
-      }
-    } catch (err) {
-      if (!err.message?.includes('400') && !err.message?.includes('401')) {
-        console.error(`[OddsFetcher] Overtime (net ${networkId}): ${err.message}`);
-      }
-    }
-  }
-
-  return results;
+function isSportsMarket(market) {
+  const text = `${market.question || ''} ${market.description || ''} ${market.groupItemTitle || ''}`.toLowerCase();
+  const SPORTS_KEYWORDS = [
+    'nba', 'nfl', 'mlb', 'nhl', 'ncaaf', 'ncaab', 'wnba', 'ufc', 'mls',
+    'soccer', 'football', 'basketball', 'baseball', 'hockey', 'tennis',
+    'f1', 'formula', 'boxing', 'mma', 'championship', 'playoff', 'finals',
+    'world cup', 'premier league', 'la liga', 'serie a', 'bundesliga',
+    'epl', 'copa', 'champions league', 'europa league', 'masters',
+    'open championship', 'wimbledon', 'us open', 'french open',
+  ];
+  return SPORTS_KEYWORDS.some(kw => text.includes(kw));
 }
 
 async function scanPolymarket() {
@@ -111,26 +56,43 @@ async function scanPolymarket() {
 
   try {
     const markets = await fetchPolymarketMarkets();
-    const data = Array.isArray(markets) ? markets : markets.data || [];
+    const data = Array.isArray(markets) ? markets : [];
 
     for (const market of data) {
-      const price = parseFloat(market.outcomePrices?.[0]);
+      if (!isSportsMarket(market)) continue;
+
+      let prices;
+      try {
+        prices = JSON.parse(market.outcomePrices || '[]');
+      } catch (_) {
+        continue;
+      }
+
+      const price = parseFloat(prices?.[0]);
       if (!price || price <= 0) continue;
 
       const decOdds = 1 / price;
       if (!isFinite(decOdds)) continue;
-      const outcomeName = market.question || market.description || 'Unknown';
+
+      const noPrice = parseFloat(prices?.[1]);
+      if (!noPrice || noPrice <= 0) continue;
+      const noOdds = 1 / noPrice;
+      if (!isFinite(noOdds)) continue;
+
+      const question = market.question || market.groupItemTitle || 'Unknown';
 
       results.push({
-        event: outcomeName,
+        event: question,
         sport: 'Polymarket',
         home: 'YES',
         away: 'NO',
         platformA: 'Polymarket',
         oddsA: decOdds,
         platformB: 'Polymarket',
-        oddsB: 1 / (1 - price),
+        oddsB: noOdds,
         source: 'polymarket',
+        marketId: market.id,
+        commenceTime: market.endDate || market.endDateIso || null,
       });
     }
   } catch (err) {
@@ -144,29 +106,32 @@ async function scanSXBet() {
   const results = [];
 
   try {
-    const markets = await fetchSXBetMarkets();
-    if (!markets) return results;
-    const raw = Array.isArray(markets) ? markets : markets.data;
-    const data = Array.isArray(raw) ? raw : [];
+    const resp = await fetchWithTimeout(`${SXBET_API}/markets/active`);
+    if (!resp.ok) throw new Error(`SX Bet: ${resp.status}`);
+    const body = await resp.json();
+    const markets = body?.data?.markets || [];
+    if (!Array.isArray(markets) || markets.length === 0) return results;
 
-    for (const market of data) {
-      const homeOdds = parseFloat(market.homeOdds) || 0;
-      const awayOdds = parseFloat(market.awayOdds) || 0;
-      if (homeOdds <= 1 || awayOdds <= 1) continue;
+    for (const market of markets) {
+      if (market.type !== 226) continue;
+      const homeTeam = market.teamOneName || 'Home';
+      const awayTeam = market.teamTwoName || 'Away';
+
+      const gameTime = market.gameTime ? new Date(market.gameTime * 1000).toISOString() : null;
 
       results.push({
-        event: market.homeTeam && market.awayTeam
-          ? `${market.homeTeam} vs ${market.awayTeam}`
-          : market.marketName || 'Unknown',
-        sport: 'SX Bet',
-        home: market.homeTeam || 'Home',
-        away: market.awayTeam || 'Away',
+        event: `${homeTeam} vs ${awayTeam}`,
+        sport: market.sportLabel || 'SX Bet',
+        home: homeTeam,
+        away: awayTeam,
         platformA: 'SX Bet',
-        oddsA: homeOdds,
+        oddsA: 0,
         platformB: 'SX Bet',
-        oddsB: awayOdds,
+        oddsB: 0,
         source: 'sxbet',
-        marketId: market.id || market.marketHash,
+        marketId: market.marketHash,
+        commenceTime: gameTime,
+        hasOdds: false,
       });
     }
   } catch (err) {
