@@ -262,7 +262,7 @@ async function scanESPN() {
 
 
 
-const ODDSAPIIO_SPORTS = [
+let ODDSAPIIO_SPORTS = [
   { slug: 'football', name: 'Football' },
   { slug: 'basketball', name: 'Basketball' },
   { slug: 'tennis', name: 'Tennis' },
@@ -287,6 +287,10 @@ const ODDSAPIIO_SPORTS = [
   { slug: 'cycling', name: 'Cycling' },
   { slug: 'athletics', name: 'Athletics' },
 ];
+if (config.oddsapiiSports) {
+  const custom = config.oddsapiiSports.split(',').map(s => s.trim().toLowerCase());
+  ODDSAPIIO_SPORTS = ODDSAPIIO_SPORTS.filter(s => custom.includes(s.slug));
+}
 const ODDSAPIIO_BOOKMAKERS = config.oddsapiiBookmakers || 'DraftKings,FanDuel';
 
 let _oddsApiClient = null;

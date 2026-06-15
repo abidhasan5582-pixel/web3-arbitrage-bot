@@ -6,6 +6,7 @@ const config = {
   oddsApiKey: process.env.ODDS_API_KEY || '',
   oddsapiiApiKey: process.env.ODDSAPIIO_API_KEY || '',
   oddsapiiBookmakers: process.env.ODDSAPIIO_BOOKMAKERS || 'DraftKings,FanDuel',
+  oddsapiiSports: process.env.ODDSAPIIO_SPORTS || '',
   sharpApiKey: process.env.SHARPAPI_API_KEY || '',
   openaiApiKey: process.env.OPENAI_API_KEY || '',
   puterApiKey: process.env.PUTER_API_KEY || '',
