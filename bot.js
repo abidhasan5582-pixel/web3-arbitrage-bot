@@ -16,6 +16,7 @@ let autoScanEnabled = false;
 let liveGameCount = 0;
 let settlementTimer = null;
 let isScanning = false;
+let pollingRunning = false;
 const rateLimitMap = new Map();
 const RATE_LIMIT_WINDOW = 2000;
 
@@ -838,37 +839,51 @@ async function startBot() {
     const testData = await testRes.json();
     if (!testData.ok) {
       console.warn(`Telegram API check failed: ${testData.description || 'unknown error'}. Skipping Telegram.`);
-      console.warn('Health server is running — bot accessible via HTTP.');
       return;
     }
     console.log(`Telegram API OK: @${testData.result.username}`);
   } catch (err) {
     console.warn(`Telegram API unreachable: ${err.message}. Skipping Telegram.`);
-    console.warn('Health server is running — bot accessible via HTTP.');
     return;
   }
-  // Clear any stale polling sessions (409 Conflict fix)
-  try {
-    await Promise.race([
-      bot.telegram.callApi('getUpdates', { offset: 0, limit: 1, timeout: 1 }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('getUpdates timeout')), 5000)),
-    ]);
-  } catch (_) { /* expected if no stale session or timeout */ }
-  try {
-    await Promise.race([
-      bot.launch(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('bot.launch timeout')), 15000)),
-    ]);
-    console.log('Bot started successfully');
-  } catch (err) {
-    if (err?.response?.error_code === 409) {
-      console.warn('Telegram 409: another bot instance is polling (local session?). Continuing without Telegram.');
-    } else if (err.message?.includes('timeout')) {
-      console.warn('Telegram bot.launch timed out — continuing without Telegram. Bot may need a restart.');
-    } else {
-      throw err;
+  // Manual long polling (avoid bot.launch() which hangs on some Node versions)
+  let pollOffset = 0;
+  pollingRunning = true;
+  const POLL_TIMEOUT = 30;
+  const POLL_LIMIT = 100;
+  async function pollLoop() {
+    while (pollingRunning) {
+      try {
+        const updates = await bot.telegram.callApi('getUpdates', {
+          offset: pollOffset,
+          timeout: POLL_TIMEOUT,
+          limit: POLL_LIMIT,
+          allowed_updates: ['message', 'callback_query'],
+        });
+        if (updates.length > 0) {
+          pollOffset = updates[updates.length - 1].update_id + 1;
+          for (const update of updates) {
+            bot.handleUpdate(update).catch(err => {
+              console.error('[Poll] handleUpdate error:', err.message);
+            });
+          }
+        }
+      } catch (err) {
+        if (err?.response?.error_code === 409) {
+          // Another instance is polling — clear stale session and retry
+          try {
+            await bot.telegram.callApi('getUpdates', { offset: 0, limit: 1, timeout: 1 });
+            pollOffset = 0;
+          } catch (_) {}
+        } else {
+          console.error('[Poll] getUpdates error:', err.message);
+          await new Promise(r => setTimeout(r, 5000));
+        }
+      }
     }
   }
+  pollLoop();
+  console.log('Bot started successfully');
   console.log(`Bankroll: $${config.bankroll}`);
   console.log(`Scan interval: ${config.scanInterval / 1000}s`);
   console.log(`Alerts: ${config.alertsEnabled ? 'ON' : 'OFF'}`);
@@ -894,12 +909,12 @@ module.exports = { startBot, bot };
 async function gracefulShutdown(signal) {
   console.log(`\n[Bot] Received ${signal}, shutting down gracefully...`);
   autoScanEnabled = false;
+  pollingRunning = false;
   if (autoScanTimer) { clearTimeout(autoScanTimer); autoScanTimer = null; }
   if (settlementTimer) { clearInterval(settlementTimer); settlementTimer = null; }
   try { server.close(); } catch (_) {}
   try { exchange.disconnectSXWebSocket(); } catch (_) {}
   try { db.close(); } catch (_) {}
-  try { await bot.stop(signal); } catch (_) {}
   console.log('[Bot] Shutdown complete.');
   process.exit(0);
 }
