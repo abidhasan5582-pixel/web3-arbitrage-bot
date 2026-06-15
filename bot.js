@@ -60,6 +60,7 @@ async function settleTrades() {
   const scores = await oddsFetcher.scanScores();
   if (scores.length === 0) return settled;
 
+  // Settle demo trades (combined demo_trades records)
   const demoOpen = db.getUnsettledDemoTrades();
   for (const trade of demoOpen) {
     const match = scores.find(s =>
@@ -81,15 +82,28 @@ async function settleTrades() {
     } else {
       payout = stakeB * trade.odds_b;
     }
-    const actualProfit = payout - totalStake;
+    const gasFee = (trade.sim_gas_cost || 0) + (trade.sim_fee_cost || 0);
+    const actualProfit = payout - totalStake - gasFee;
     const actualRoi = totalStake > 0 ? (actualProfit / totalStake) * 100 : 0;
 
     db.closeDemoTrade(trade.id, actualProfit, actualRoi);
     db.markSettlementChecked('demo_trades', trade.id);
+    db.closeDemoBet(trade.id, actualProfit, actualRoi);
+
+    // Close per-leg real_trades records
+    const perLegRecords = db.queryAll("SELECT id FROM real_trades WHERE arb_id = $arbId AND is_demo = 1", {
+      $arbId: `demo_${trade.id}`,
+    });
+    for (const leg of perLegRecords) {
+      db.closeRealTrade(leg.id, actualProfit, actualRoi);
+      db.markSettlementChecked('real_trades', leg.id);
+    }
+
     settled.demo.push({ ...trade, actualProfit, actualRoi });
     console.log(`[Settlement] Demo #${trade.id}: ${trade.event} | P&L: $${actualProfit.toFixed(4)} (${actualRoi.toFixed(2)}%)`);
   }
 
+  // Settle real per-leg records (is_demo excluded by query)
   const realOpen = db.getUnsettledRealTrades();
   for (const trade of realOpen) {
     const match = scores.find(s =>

@@ -14,15 +14,15 @@
   "dependencies": {
     "blessed": "0.1.81",
     "dotenv": "16.4.7",
+    "ethers": "^6.0.0",
     "sql.js": "1.14.1",
     "telegraf": "4.16.3",
     "viem": "^2.0.0",
-    "ethers": "^6.0.0",
     "ws": "^8.0.0"
   },
   "optionalDependencies": {
-    "@polymarket/clob-client-v2": "^1.0.0",
-    "@azuro-org/toolkit": "^1.0.0"
+    "@azuro-org/toolkit": "^6.2.0",
+    "@polymarket/clob-client-v2": "^1.0.0"
   },
   "engines": {
     "node": ">=18.0.0"

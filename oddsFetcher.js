@@ -190,8 +190,8 @@ async function scanESPN() {
 
   for (const sport of ESPN_SPORTS) {
     try {
-      const url = `https://site.api.espn.com/apis/site/v2/sports/${sport.slug}/scoreboard`;
-      const res = await fetchWithTimeout(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+      const boardUrl = `https://site.api.espn.com/apis/site/v2/sports/${sport.slug}/scoreboard`;
+      const res = await fetchWithTimeout(boardUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
       if (!res.ok) {
         if (res.status !== 400 && res.status !== 404) console.error(`[ESPN] ${sport.name}: ${res.status}`);
         continue;
@@ -201,15 +201,56 @@ async function scanESPN() {
       const events = data.events || [];
       if (events.length === 0) continue;
 
+      const [coreSport, coreLeague] = sport.slug.split('/');
+
       for (const event of events) {
         const comp = event.competitions?.[0];
         if (!comp) continue;
-        const odds = comp.odds?.[0];
-        if (!odds?.moneyline) continue;
 
         const homeTeam = comp.competitors?.find(c => c.homeAway === 'home');
         const awayTeam = comp.competitors?.find(c => c.homeAway === 'away');
         if (!homeTeam || !awayTeam) continue;
+
+        const homeName = homeTeam.team?.displayName || homeTeam.team?.name || 'Home';
+        const awayName = awayTeam.team?.displayName || awayTeam.team?.name || 'Away';
+        const eventName = event.name || `${awayName} at ${homeName}`;
+
+        // Primary: Core API — returns decimal odds with provider names
+        const coreUrl = `https://sports.core.api.espn.com/v2/sports/${coreSport}/leagues/${coreLeague}/events/${event.id}/competitions/${comp.id}/odds`;
+        const coreRes = await fetchWithTimeout(coreUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+
+        if (coreRes.ok) {
+          const coreData = await coreRes.json();
+          const items = coreData.items || [];
+          let coreFound = false;
+
+          for (const item of items) {
+            const homeML = item.homeTeamOdds?.current?.moneyLine?.decimal;
+            const awayML = item.awayTeamOdds?.current?.moneyLine?.decimal;
+            if (!homeML || !awayML) continue;
+            if (homeML <= 1 || awayML <= 1) continue;
+
+            results.push({
+              event: eventName,
+              sport: sport.name,
+              home: homeName,
+              away: awayName,
+              platformA: item.provider?.name || 'DraftKings',
+              oddsA: homeML,
+              platformB: item.provider?.name || 'DraftKings',
+              oddsB: awayML,
+              source: 'espn',
+              commenceTime: event.date,
+            });
+            coreFound = true;
+          }
+
+          if (coreFound) continue; // skip scoreboard fallback
+        }
+
+        // Fallback: scoreboard odds (American format)
+        const odds = comp.odds?.[0];
+        if (!odds?.moneyline) continue;
 
         const homeMoneyline = odds.moneyline.home?.close?.odds;
         const awayMoneyline = odds.moneyline.away?.close?.odds;
@@ -219,18 +260,14 @@ async function scanESPN() {
         const awayDec = americanToDecimal(awayMoneyline);
         if (homeDec <= 1 || awayDec <= 1) continue;
 
-        const homeName = homeTeam.team?.displayName || homeTeam.team?.name || 'Home';
-        const awayName = awayTeam.team?.displayName || awayTeam.team?.name || 'Away';
-        const eventName = event.name || `${awayName} at ${homeName}`;
-
         results.push({
           event: eventName,
           sport: sport.name,
           home: homeName,
           away: awayName,
-          platformA: `ESPN (${odds.provider?.name || 'DraftKings'})`,
+          platformA: odds.provider?.name || 'DraftKings',
           oddsA: homeDec,
-          platformB: `ESPN (${odds.provider?.name || 'DraftKings'})`,
+          platformB: odds.provider?.name || 'DraftKings',
           oddsB: awayDec,
           source: 'espn',
           commenceTime: event.date,
@@ -249,15 +286,14 @@ async function scanESPN() {
 }
 
 async function scanAll() {
-  const [overtimeOdds, espnOdds, polymarketOdds, sxbetOdds, azuroOdds] = await Promise.all([
-    scanOvertime(),
+  const [espnOdds, polymarketOdds, sxbetOdds, azuroOdds] = await Promise.all([
     scanESPN(),
     scanPolymarket(),
     scanSXBet(),
     scanAzuro(),
   ]);
 
-  const combined = [...overtimeOdds, ...espnOdds, ...polymarketOdds, ...sxbetOdds, ...azuroOdds];
+  const combined = [...espnOdds, ...polymarketOdds, ...sxbetOdds, ...azuroOdds];
   return liveFilter(combined);
 }
 
@@ -402,4 +438,4 @@ function liveFilter(oddsData) {
   });
 }
 
-module.exports = { scanAll, scanOvertime, scanPolymarket, scanSXBet, scanESPN, scanAzuro, liveFilter, scanScores, countLiveGames };
+module.exports = { scanAll, scanPolymarket, scanSXBet, scanESPN, scanAzuro, liveFilter, scanScores, countLiveGames };

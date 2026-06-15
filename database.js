@@ -65,6 +65,8 @@ async function initDatabase() {
   `);
 
   try { db.run('ALTER TABLE bets ADD COLUMN is_demo INTEGER DEFAULT 0'); } catch (_) {}
+  try { db.run('ALTER TABLE bets ADD COLUMN demo_trade_id INTEGER'); } catch (_) {}
+  try { db.run('ALTER TABLE bets ADD COLUMN guaranteed_return REAL DEFAULT 0'); } catch (_) {}
   try { db.run("ALTER TABLE demo_trades ADD COLUMN sim_slippage_a REAL DEFAULT 0"); } catch (_) {}
   try { db.run("ALTER TABLE demo_trades ADD COLUMN sim_slippage_b REAL DEFAULT 0"); } catch (_) {}
   try { db.run("ALTER TABLE demo_trades ADD COLUMN sim_order_id_a TEXT"); } catch (_) {}
@@ -73,6 +75,7 @@ async function initDatabase() {
   try { db.run("ALTER TABLE demo_trades ADD COLUMN sim_fee_cost REAL DEFAULT 0"); } catch (_) {}
   try { db.run("ALTER TABLE demo_trades ADD COLUMN settlement_last_checked TEXT"); } catch (_) {}
   try { db.run("ALTER TABLE real_trades ADD COLUMN settlement_last_checked TEXT"); } catch (_) {}
+  try { db.run("ALTER TABLE real_trades ADD COLUMN is_demo INTEGER DEFAULT 0"); } catch (_) {}
 
   db.run(`
     CREATE TABLE IF NOT EXISTS demo_stats (
@@ -146,7 +149,8 @@ async function initDatabase() {
       roi REAL DEFAULT 0,
       opened_at TEXT DEFAULT (datetime('now')),
       closed_at TEXT,
-      settlement_last_checked TEXT
+      settlement_last_checked TEXT,
+      is_demo INTEGER DEFAULT 0
     )
   `);
 
@@ -214,6 +218,7 @@ function runSql(sql, params = {}) {
 
 module.exports = {
   initDatabase,
+  queryAll,
 
   getSetting(key, defaultValue = null) {
     const row = queryOne('SELECT value FROM settings WHERE key = $key', { $key: key });
@@ -228,8 +233,8 @@ module.exports = {
   },
 
   logBet(bet) {
-    runSql(`INSERT INTO bets (event, sport, platform_a, odds_a, stake_a, platform_b, odds_b, stake_b, total_staked, guaranteed_return, profit, roi, status, is_demo)
-      VALUES ($event, $sport, $platformA, $oddsA, $stakeA, $platformB, $oddsB, $stakeB, $totalStaked, $guaranteedReturn, $profit, $roi, $status, $isDemo)`, {
+    runSql(`INSERT INTO bets (event, sport, platform_a, odds_a, stake_a, platform_b, odds_b, stake_b, total_staked, guaranteed_return, profit, roi, status, is_demo, demo_trade_id)
+      VALUES ($event, $sport, $platformA, $oddsA, $stakeA, $platformB, $oddsB, $stakeB, $totalStaked, $guaranteedReturn, $profit, $roi, $status, $isDemo, $demoTradeId)`, {
       $event: bet.event,
       $sport: bet.sport || '',
       $platformA: bet.platformA,
@@ -244,6 +249,7 @@ module.exports = {
       $roi: bet.roi,
       $status: bet.status || 'settled',
       $isDemo: bet.isDemo ? 1 : 0,
+      $demoTradeId: bet.demo_trade_id || null,
     });
   },
 
@@ -361,6 +367,8 @@ module.exports = {
       $simGasCost: trade.simGasCost || 0,
       $simFeeCost: trade.simFeeCost || 0,
     });
+    const row = queryOne('SELECT last_insert_rowid() as id');
+    return row?.id || null;
   },
 
   closeDemoTrade(id, actualProfit, actualRoi) {
@@ -381,6 +389,14 @@ module.exports = {
 
   getAllDemoTrades(limit = 20) {
     return queryAll('SELECT * FROM demo_trades ORDER BY opened_at DESC LIMIT $limit', { $limit: limit });
+  },
+
+  closeDemoBet(demoTradeId, profit, roi) {
+    runSql("UPDATE bets SET profit=$profit, roi=$roi, status='settled' WHERE demo_trade_id=$id AND is_demo=1", {
+      $id: demoTradeId,
+      $profit: profit,
+      $roi: roi,
+    });
   },
 
   updateDemoStats(date, stats) {
@@ -417,8 +433,8 @@ module.exports = {
   },
 
   openRealTrade(trade) {
-    runSql(`INSERT INTO real_trades (arb_id, event, platform, market_id, side, odds, stake, status, tx_hash, order_id, error)
-      VALUES ($arbId, $event, $platform, $marketId, $side, $odds, $stake, $status, $txHash, $orderId, $error)`, {
+    runSql(`INSERT INTO real_trades (arb_id, event, platform, market_id, side, odds, stake, status, tx_hash, order_id, error, is_demo)
+      VALUES ($arbId, $event, $platform, $marketId, $side, $odds, $stake, $status, $txHash, $orderId, $error, $isDemo)`, {
       $arbId: trade.arbId || null,
       $event: trade.event,
       $platform: trade.platform,
@@ -430,6 +446,7 @@ module.exports = {
       $txHash: trade.txHash || null,
       $orderId: trade.orderId || null,
       $error: trade.error || null,
+      $isDemo: trade.is_demo || 0,
     });
   },
 
@@ -455,7 +472,7 @@ module.exports = {
   },
 
   getOpenRealTrades() {
-    return queryAll("SELECT * FROM real_trades WHERE status IN ('pending', 'open') ORDER BY opened_at ASC");
+    return queryAll("SELECT * FROM real_trades WHERE status IN ('pending', 'open') AND is_demo = 0 ORDER BY opened_at ASC");
   },
 
   getClosedRealTrades(limit = 20) {
@@ -467,9 +484,9 @@ module.exports = {
   },
 
   getRealTradeSummary() {
-    const open = queryOne("SELECT COUNT(*) as count, COALESCE(SUM(stake), 0) as total_staked FROM real_trades WHERE status IN ('pending', 'open')");
-    const closed = queryOne("SELECT COUNT(*) as count, COALESCE(SUM(profit), 0) as total_profit, COALESCE(SUM(stake), 0) as total_staked, COALESCE(AVG(roi), 0) as avg_roi FROM real_trades WHERE status='closed'");
-    const today = queryOne("SELECT COUNT(*) as today_trades, COALESCE(SUM(profit), 0) as today_profit FROM real_trades WHERE status='closed' AND date(closed_at) = date('now')");
+    const open = queryOne("SELECT COUNT(*) as count, COALESCE(SUM(stake), 0) as total_staked FROM real_trades WHERE status IN ('pending', 'open') AND is_demo = 0");
+    const closed = queryOne("SELECT COUNT(*) as count, COALESCE(SUM(profit), 0) as total_profit, COALESCE(SUM(stake), 0) as total_staked, COALESCE(AVG(roi), 0) as avg_roi FROM real_trades WHERE status='closed' AND is_demo = 0");
+    const today = queryOne("SELECT COUNT(*) as today_trades, COALESCE(SUM(profit), 0) as today_profit FROM real_trades WHERE status='closed' AND is_demo = 0 AND date(closed_at) = date('now')");
     return {
       open_count: open?.count || 0,
       total_staked: open?.total_staked || 0,
@@ -490,7 +507,7 @@ module.exports = {
   },
 
   getUnsettledRealTrades() {
-    return queryAll("SELECT * FROM real_trades WHERE status IN ('pending', 'open') ORDER BY opened_at ASC");
+    return queryAll("SELECT * FROM real_trades WHERE status IN ('pending', 'open') AND is_demo = 0 ORDER BY opened_at ASC");
   },
 
   markSettlementChecked(table, id) {

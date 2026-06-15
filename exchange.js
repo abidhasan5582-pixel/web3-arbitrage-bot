@@ -249,7 +249,7 @@ class ExchangeOrchestrator {
       simulatedSlippage: slippageB,
     };
 
-    db.openDemoTrade({
+    const demoTradeId = db.openDemoTrade({
       event: arb.event,
       sport: arb.sport || '',
       home: arb.home || '',
@@ -267,13 +267,54 @@ class ExchangeOrchestrator {
       roi: 0,
       source: arb.source,
       commenceTime: arb.commenceTime,
-      // Attach sim metadata as extra fields
       simSlippageA: slippageA,
       simSlippageB: slippageB,
       simOrderIdA: legA.orderId,
       simOrderIdB: legB.orderId,
       simGasCost: costs.totalGas,
       simFeeCost: costs.totalFees,
+    });
+
+    // Unified bets table record
+    db.logBet({
+      event: arb.event,
+      sport: arb.sport || '',
+      platformA: arb.platformA,
+      oddsA: simOddsA,
+      stakeA,
+      platformB: arb.platformB,
+      oddsB: simOddsB,
+      stakeB,
+      guaranteedReturn,
+      profit: 0,
+      roi: 0,
+      status: 'pending',
+      isDemo: 1,
+      demo_trade_id: demoTradeId,
+    });
+
+    // Per-leg records matching real_trades structure
+    db.openRealTrade({
+      arbId: `demo_${demoTradeId}`,
+      event: arb.event,
+      platform: arb.platformA,
+      side: 'home',
+      odds: simOddsA,
+      stake: stakeA,
+      status: 'open',
+      orderId: legA.orderId,
+      is_demo: 1,
+    });
+    db.openRealTrade({
+      arbId: `demo_${demoTradeId}`,
+      event: arb.event,
+      platform: arb.platformB,
+      side: 'away',
+      odds: simOddsB,
+      stake: stakeB,
+      status: 'open',
+      orderId: legB.orderId,
+      is_demo: 1,
     });
 
     console.log(
@@ -286,6 +327,7 @@ class ExchangeOrchestrator {
     return {
       success: true,
       demo: true,
+      demoTradeId,
       legs: [legA, legB],
       totalProfit: netProfit,
       costs,
