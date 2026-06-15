@@ -280,7 +280,7 @@ async function scanOddsAPI() {
   const oddsKey = config.oddsApiKey;
   const apiKey = parlayKey || oddsKey;
   if (!apiKey) return results;
-  const baseUrl = parlayKey ? 'https://api.parlayapi.com/v1' : ODDS_API_BASE;
+  const baseUrl = parlayKey ? 'https://parlay-api.com/v1' : ODDS_API_BASE;
 
   for (const sport of ODDS_API_SPORTS) {
     try {
@@ -334,6 +334,85 @@ async function scanOddsAPI() {
   return results;
 }
 
+const SHARPAPI_LEAGUES = [
+  { key: 'NBA', name: 'NBA' },
+  { key: 'NFL', name: 'NFL' },
+  { key: 'MLB', name: 'MLB' },
+  { key: 'NHL', name: 'NHL' },
+  { key: 'NCAAF', name: 'NCAAF' },
+  { key: 'NCAAB', name: 'NCAAB' },
+  { key: 'EPL', name: 'EPL' },
+  { key: 'LALIGA', name: 'La Liga' },
+  { key: 'SERIEA', name: 'Serie A' },
+  { key: 'BUNDESLIGA', name: 'Bundesliga' },
+  { key: 'LIGUE1', name: 'Ligue 1' },
+  { key: 'MLS', name: 'MLS' },
+  { key: 'UFC', name: 'MMA' },
+];
+
+async function scanSharpAPI() {
+  const results = [];
+  const apiKey = config.sharpApiKey;
+  if (!apiKey) return results;
+  const baseUrl = 'https://api.sharpapi.io/api/v1';
+
+  for (const league of SHARPAPI_LEAGUES) {
+    try {
+      const url = `${baseUrl}/odds?league=${league.key}`;
+      const res = await fetchWithTimeout(url, {
+        headers: { 'X-API-Key': apiKey, 'User-Agent': 'Mozilla/5.0' },
+      });
+      if (!res.ok) {
+        if (res.status === 401 || res.status === 403) {
+          console.log(`[SharpAPI] ${league.name}: invalid API key — skipping`);
+          return results;
+        }
+        continue;
+      }
+      const body = await res.json();
+      const selections = body?.data;
+      if (!Array.isArray(selections) || selections.length === 0) continue;
+
+      // Group by (sportsbook, home_team, away_team)
+      const groups = {};
+      for (const s of selections) {
+        if (s.market_type !== 'moneyline') continue;
+        if (!s.odds_decimal || s.odds_decimal <= 1) continue;
+        const key = `${s.sportsbook}|${s.home_team}|${s.away_team}`;
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(s);
+      }
+
+      for (const [gk, group] of Object.entries(groups)) {
+        const [sportsbook, homeName, awayName] = gk.split('|');
+        const homeSel = group.find(s => s.selection === homeName);
+        const awaySel = group.find(s => s.selection === awayName);
+        if (!homeSel?.odds_decimal || !awaySel?.odds_decimal) continue;
+
+        const normEvent = normalizeEventName(awayName, homeName);
+        results.push({
+          event: normEvent,
+          sport: league.name,
+          home: homeName,
+          away: awayName,
+          platformA: sportsbook,
+          oddsA: homeSel.odds_decimal,
+          platformB: sportsbook,
+          oddsB: awaySel.odds_decimal,
+          source: 'sharpapi',
+          isLive: !!homeSel.is_live,
+          commenceTime: null,
+        });
+      }
+    } catch (err) {
+      if (!err.message?.includes('aborted')) {
+        console.error(`[SharpAPI] ${league.name}: ${err.message}`);
+      }
+    }
+  }
+  return results;
+}
+
 async function scanAll() {
   const sources = [
     scanESPN(),
@@ -341,11 +420,12 @@ async function scanAll() {
     scanSXBet(),
     scanAzuro(),
     scanOddsAPI(),
+    scanSharpAPI(),
   ];
   const results = await Promise.allSettled(sources);
 
   const combined = [];
-  const sourceLabels = ['ESPN', 'Polymarket', 'SX Bet', 'Azuro', 'OddsAPI'];
+  const sourceLabels = ['ESPN', 'Polymarket', 'SX Bet', 'Azuro', 'OddsAPI', 'SharpAPI'];
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
     if (r.status === 'fulfilled') {
@@ -565,4 +645,4 @@ function liveFilter(oddsData) {
   });
 }
 
-module.exports = { scanAll, scanPolymarket, scanSXBet, scanESPN, scanAzuro, scanOddsAPI, liveFilter, scanScores, countLiveGames, normalizeEventName };
+module.exports = { scanAll, scanPolymarket, scanSXBet, scanESPN, scanAzuro, scanOddsAPI, scanSharpAPI, liveFilter, scanScores, countLiveGames, normalizeEventName };

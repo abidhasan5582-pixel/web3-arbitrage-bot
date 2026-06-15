@@ -798,6 +798,7 @@ async function startBot() {
   console.log('Chat ID configured:', config.telegramChatId ? 'YES' : 'NO');
   console.log('Odds API:', config.oddsApiKey ? 'SET' : 'MISSING');
   console.log('ParlayAPI:', process.env.PARLAYAPI_API_KEY ? 'SET' : 'MISSING');
+  console.log('SharpAPI:', config.sharpApiKey ? 'SET' : 'MISSING');
   console.log('Bankroll: $' + config.bankroll);
 
   // Always start health server first (for Railway)
