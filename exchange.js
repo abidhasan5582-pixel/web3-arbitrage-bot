@@ -1,5 +1,6 @@
 const config = require('./config');
 const db = require('./database');
+const risk = require('./risk');
 
 class ExchangeOrchestrator {
   constructor() {
@@ -208,9 +209,45 @@ class ExchangeOrchestrator {
     }
   }
 
+  _simOrderId(platform) {
+    const key = platform.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (key.includes('polymarket')) {
+      return '0x' + Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join('');
+    }
+    return `sim_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  }
+
   async executeDemoArb(arb) {
-    const stake = config.bankroll * config.maxBetPercent;
-    const arbProfit = (stake * arb.roi) / 100;
+    const bankStake = config.bankroll * config.maxBetPercent;
+    const stakeA = arb.stakeA || (bankStake / 2);
+    const stakeB = arb.stakeB || (bankStake / 2);
+    const totalStake = stakeA + stakeB;
+
+    const slippageA = (Math.random() * 2 - 1) * config.liveSlippageTolerance;
+    const slippageB = (Math.random() * 2 - 1) * config.liveSlippageTolerance;
+    const simOddsA = arb.oddsA * (1 + slippageA);
+    const simOddsB = arb.oddsB * (1 + slippageB);
+
+    const costs = risk.estimateTotalCost(arb.platformA, arb.platformB, stakeA, stakeB);
+    const homePayout = stakeA * simOddsA;
+    const awayPayout = stakeB * simOddsB;
+    const guaranteedReturn = Math.min(homePayout, awayPayout);
+    const netProfit = guaranteedReturn - totalStake - costs.totalCost;
+
+    const legA = {
+      platform: arb.platformA, side: 'home',
+      odds: simOddsA, stake: stakeA,
+      status: 'simulated',
+      orderId: this._simOrderId(arb.platformA),
+      simulatedSlippage: slippageA,
+    };
+    const legB = {
+      platform: arb.platformB, side: 'away',
+      odds: simOddsB, stake: stakeB,
+      status: 'simulated',
+      orderId: this._simOrderId(arb.platformB),
+      simulatedSlippage: slippageB,
+    };
 
     db.openDemoTrade({
       event: arb.event,
@@ -218,27 +255,40 @@ class ExchangeOrchestrator {
       home: arb.home || '',
       away: arb.away || '',
       platformA: arb.platformA,
-      oddsA: arb.oddsA,
-      stakeA: arb.stakeA || (stake / 2),
+      oddsA: simOddsA,
+      stakeA,
       platformB: arb.platformB,
-      oddsB: arb.oddsB,
-      stakeB: arb.stakeB || (stake / 2),
-      expectedProfit: arbProfit,
-      expectedRoi: arb.roi,
-      profit: arbProfit,
-      roi: arb.roi,
+      oddsB: simOddsB,
+      stakeB,
+      totalStaked: totalStake,
+      expectedProfit: Math.max(0, netProfit),
+      expectedRoi: totalStake > 0 ? (netProfit / totalStake) * 100 : 0,
+      profit: 0,
+      roi: 0,
       source: arb.source,
       commenceTime: arb.commenceTime,
+      // Attach sim metadata as extra fields
+      simSlippageA: slippageA,
+      simSlippageB: slippageB,
+      simOrderIdA: legA.orderId,
+      simOrderIdB: legB.orderId,
+      simGasCost: costs.totalGas,
+      simFeeCost: costs.totalFees,
     });
+
+    console.log(
+      `[Demo] EXECUTED #${arb.event} | ` +
+      `Odds: ${simOddsA.toFixed(3)}/${simOddsB.toFixed(3)} (slip ${(slippageA*100).toFixed(1)}%/${(slippageB*100).toFixed(1)}%) | ` +
+      `Gas: $${costs.totalGas.toFixed(4)} Fees: $${costs.totalFees.toFixed(4)} | ` +
+      `Net P&L: $${netProfit.toFixed(4)}`
+    );
 
     return {
       success: true,
       demo: true,
-      legs: [
-        { platform: arb.platformA, side: 'home', odds: arb.oddsA, stake: arb.stakeA || (stake / 2), status: 'simulated' },
-        { platform: arb.platformB, side: 'away', odds: arb.oddsB, stake: arb.stakeB || (stake / 2), status: 'simulated' },
-      ],
-      totalProfit: arbProfit,
+      legs: [legA, legB],
+      totalProfit: netProfit,
+      costs,
     };
   }
 

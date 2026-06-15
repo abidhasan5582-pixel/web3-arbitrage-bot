@@ -154,8 +154,8 @@ async function startTUI() {
     header.setContent([
       `{bold}Web3 Sports Arbitrage Scanner{/bold}    $${config.bankroll}  |  ${botStatus}  |  ${demoStatus}  |  ${liveStatus}  |  ${autoStatus}  |  Scan: ${scanCount}  ${platformInfo}`,
       `ROI: ${(config.minArbROI * 100).toFixed(1)}%  |  Bet: $${(config.bankroll * config.maxBetPercent).toFixed(2)}  |  Speed: ${autoScanInterval / 1000}s  |  Tg: ${missing.length === 0 ? '{green-fg}✓{/green-fg}' : '{red-fg}✗{/red-fg}'}`,
-      `Demo: ${demo.open_count || 0} open | ${demo.closed_count || 0} closed | ${demoProfit}`,
-      `Live: ${real.open_count || 0} open | ${real.closed_count || 0} closed | P&L: $${(real.total_profit || 0).toFixed(2)}`,
+      `Demo: ${demo.open_count || 0} open | ${demo.closed_count || 0} settled | ${demoProfit}`,
+      `Live: ${real.open_count || 0} open | ${real.closed_count || 0} settled | P&L: $${(real.total_profit || 0).toFixed(2)}`,
     ].join('\n'));
     screen.render();
   }

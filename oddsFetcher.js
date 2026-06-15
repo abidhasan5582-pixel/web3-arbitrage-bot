@@ -293,7 +293,51 @@ async function scanAll() {
   return liveFilter(combined);
 }
 
-async function scanScores() {
+async function scanScoresOddsApi() {
+  const results = [];
+  if (!config.oddsApiKey) return results;
+
+  for (const sport of SPORTS) {
+    try {
+      const url = `${ODDS_API_BASE}/sports/${sport.key}/scores/?apiKey=${config.oddsApiKey}&daysFrom=2`;
+      const res = await fetchWithTimeout(url);
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (!Array.isArray(data)) continue;
+
+      for (const event of data) {
+        if (!event.completed) continue;
+        const scores = event.scores;
+        if (!scores || scores.length < 2) continue;
+
+        const homeScore = parseInt(scores.find(s => s.name === event.home_team)?.score ?? 0);
+        const awayScore = parseInt(scores.find(s => s.name === event.away_team)?.score ?? 0);
+        const winner = homeScore > awayScore ? 'home' : 'away';
+        const evName = event.home_team && event.away_team
+          ? `${event.home_team} vs ${event.away_team}`
+          : event.sport_title;
+
+        results.push({
+          event: evName,
+          sport: sport.name,
+          home: event.home_team || 'Home',
+          away: event.away_team || 'Away',
+          homeScore,
+          awayScore,
+          winner,
+          winnerName: winner === 'home' ? event.home_team : event.away_team,
+          completed: true,
+          commenceTime: event.commence_time,
+          source: 'oddspapi',
+        });
+      }
+    } catch (_) {}
+  }
+
+  return results;
+}
+
+async function _scanScoresESPN() {
   const results = [];
 
   for (const sport of ESPN_SPORTS) {
@@ -342,6 +386,20 @@ async function scanScores() {
   }
 
   return results;
+}
+
+async function scanScores() {
+  const [espn, oddsApi] = await Promise.all([
+    _scanScoresESPN(),
+    scanScoresOddsApi(),
+  ]);
+  const seen = new Set();
+  const merged = [];
+  for (const s of [...espn, ...oddsApi]) {
+    const key = `${s.event}|${s.home}|${s.away}`;
+    if (!seen.has(key)) { seen.add(key); merged.push(s); }
+  }
+  return merged;
 }
 
 const AZURO_SUBGRAPH = 'https://api.thegraph.com/subgraphs/name/azuro-org/azuro-api-polygon';
@@ -420,4 +478,4 @@ function liveFilter(oddsData) {
   });
 }
 
-module.exports = { scanAll, scanAllSports, scanPolymarket, scanSXBet, scanESPN, scanAzuro, liveFilter, scanScores };
+module.exports = { scanAll, scanAllSports, scanPolymarket, scanSXBet, scanESPN, scanAzuro, liveFilter, scanScores, scanScoresOddsApi };

@@ -65,6 +65,14 @@ async function initDatabase() {
   `);
 
   try { db.run('ALTER TABLE bets ADD COLUMN is_demo INTEGER DEFAULT 0'); } catch (_) {}
+  try { db.run("ALTER TABLE demo_trades ADD COLUMN sim_slippage_a REAL DEFAULT 0"); } catch (_) {}
+  try { db.run("ALTER TABLE demo_trades ADD COLUMN sim_slippage_b REAL DEFAULT 0"); } catch (_) {}
+  try { db.run("ALTER TABLE demo_trades ADD COLUMN sim_order_id_a TEXT"); } catch (_) {}
+  try { db.run("ALTER TABLE demo_trades ADD COLUMN sim_order_id_b TEXT"); } catch (_) {}
+  try { db.run("ALTER TABLE demo_trades ADD COLUMN sim_gas_cost REAL DEFAULT 0"); } catch (_) {}
+  try { db.run("ALTER TABLE demo_trades ADD COLUMN sim_fee_cost REAL DEFAULT 0"); } catch (_) {}
+  try { db.run("ALTER TABLE demo_trades ADD COLUMN settlement_last_checked TEXT"); } catch (_) {}
+  try { db.run("ALTER TABLE real_trades ADD COLUMN settlement_last_checked TEXT"); } catch (_) {}
 
   db.run(`
     CREATE TABLE IF NOT EXISTS demo_stats (
@@ -109,7 +117,14 @@ async function initDatabase() {
       source TEXT,
       commence_time TEXT,
       opened_at TEXT DEFAULT (datetime('now')),
-      closed_at TEXT
+      closed_at TEXT,
+      sim_slippage_a REAL DEFAULT 0,
+      sim_slippage_b REAL DEFAULT 0,
+      sim_order_id_a TEXT,
+      sim_order_id_b TEXT,
+      sim_gas_cost REAL DEFAULT 0,
+      sim_fee_cost REAL DEFAULT 0,
+      settlement_last_checked TEXT
     )
   `);
 
@@ -130,7 +145,8 @@ async function initDatabase() {
       profit REAL DEFAULT 0,
       roi REAL DEFAULT 0,
       opened_at TEXT DEFAULT (datetime('now')),
-      closed_at TEXT
+      closed_at TEXT,
+      settlement_last_checked TEXT
     )
   `);
 
@@ -321,8 +337,8 @@ module.exports = {
   },
 
   openDemoTrade(trade) {
-    runSql(`INSERT INTO demo_trades (event, sport, home, away, platform_a, odds_a, stake_a, platform_b, odds_b, stake_b, total_staked, expected_profit, expected_roi, status, source, commence_time)
-      VALUES ($event, $sport, $home, $away, $platformA, $oddsA, $stakeA, $platformB, $oddsB, $stakeB, $totalStaked, $expectedProfit, $expectedRoi, 'open', $source, $commenceTime)`, {
+    runSql(`INSERT INTO demo_trades (event, sport, home, away, platform_a, odds_a, stake_a, platform_b, odds_b, stake_b, total_staked, expected_profit, expected_roi, status, source, commence_time, sim_slippage_a, sim_slippage_b, sim_order_id_a, sim_order_id_b, sim_gas_cost, sim_fee_cost)
+      VALUES ($event, $sport, $home, $away, $platformA, $oddsA, $stakeA, $platformB, $oddsB, $stakeB, $totalStaked, $expectedProfit, $expectedRoi, 'open', $source, $commenceTime, $simSlippageA, $simSlippageB, $simOrderIdA, $simOrderIdB, $simGasCost, $simFeeCost)`, {
       $event: trade.event,
       $sport: trade.sport || '',
       $home: trade.home || '',
@@ -338,6 +354,12 @@ module.exports = {
       $expectedRoi: trade.expectedRoi || trade.roi || 0,
       $source: trade.source || '',
       $commenceTime: trade.commenceTime || null,
+      $simSlippageA: trade.simSlippageA || 0,
+      $simSlippageB: trade.simSlippageB || 0,
+      $simOrderIdA: trade.simOrderIdA || null,
+      $simOrderIdB: trade.simOrderIdB || null,
+      $simGasCost: trade.simGasCost || 0,
+      $simFeeCost: trade.simFeeCost || 0,
     });
   },
 
@@ -461,6 +483,30 @@ module.exports = {
 
   clearRealData() {
     runSql('DELETE FROM real_trades');
+  },
+
+  getUnsettledDemoTrades() {
+    return queryAll("SELECT * FROM demo_trades WHERE status='open' ORDER BY opened_at ASC");
+  },
+
+  getUnsettledRealTrades() {
+    return queryAll("SELECT * FROM real_trades WHERE status IN ('pending', 'open') ORDER BY opened_at ASC");
+  },
+
+  markSettlementChecked(table, id) {
+    const tbl = table === 'real_trades' ? 'real_trades' : 'demo_trades';
+    runSql(`UPDATE ${tbl} SET settlement_last_checked=datetime('now') WHERE id=$id`, { $id: id });
+  },
+
+  getSettlementSummary() {
+    const demo = queryOne("SELECT COUNT(*) as open_count, COALESCE(SUM(expected_profit), 0) as expected_pnl FROM demo_trades WHERE status='open'");
+    const real = queryOne("SELECT COUNT(*) as open_count, COALESCE(SUM(stake), 0) as total_staked FROM real_trades WHERE status IN ('pending', 'open')");
+    return {
+      demo_open: demo?.count || 0,
+      demo_expected_pnl: demo?.expected_pnl || 0,
+      real_open: real?.count || 0,
+      real_staked: real?.total_staked || 0,
+    };
   },
 
   close() {

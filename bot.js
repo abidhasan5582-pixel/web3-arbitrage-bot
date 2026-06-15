@@ -12,6 +12,7 @@ const bot = new Telegraf(config.telegramBotToken);
 let scanCount = 0;
 let startTime = Date.now();
 let autoScanTimer = null;
+let settlementTimer = null;
 let isScanning = false;
 const rateLimitMap = new Map();
 const RATE_LIMIT_WINDOW = 2000;
@@ -51,14 +52,14 @@ function formatArbMessage(arb, index) {
   return msg;
 }
 
-async function closeCompletedDemoTrades() {
-  const open = db.getOpenDemoTrades();
-  if (open.length === 0) return [];
+async function settleTrades() {
+  const settled = { demo: [], real: [] };
 
   const scores = await oddsFetcher.scanScores();
-  const closed = [];
+  if (scores.length === 0) return settled;
 
-  for (const trade of open) {
+  const demoOpen = db.getUnsettledDemoTrades();
+  for (const trade of demoOpen) {
     const match = scores.find(s =>
       s.event === trade.event ||
       (s.home === trade.home && s.away === trade.away) ||
@@ -70,7 +71,7 @@ async function closeCompletedDemoTrades() {
     const stakeB = trade.stake_b;
     const totalStake = stakeA + stakeB;
     const isHomeWinner = match.winner === 'home';
-    const betOnHome = trade.home === match.homeName || trade.home === match.home;
+    const betOnHome = trade.home === match.home || trade.home === match.homeName;
 
     let payout;
     if ((isHomeWinner && betOnHome) || (!isHomeWinner && !betOnHome)) {
@@ -79,14 +80,40 @@ async function closeCompletedDemoTrades() {
       payout = stakeB * trade.odds_b;
     }
     const actualProfit = payout - totalStake;
-    const actualRoi = (actualProfit / totalStake) * 100;
+    const actualRoi = totalStake > 0 ? (actualProfit / totalStake) * 100 : 0;
 
     db.closeDemoTrade(trade.id, actualProfit, actualRoi);
-    closed.push({ ...trade, actualProfit, actualRoi });
-    console.log(`[Demo] CLOSED #${trade.id}: ${trade.event} | P&L: $${actualProfit.toFixed(4)} (${actualRoi.toFixed(2)}%)`);
+    db.markSettlementChecked('demo_trades', trade.id);
+    settled.demo.push({ ...trade, actualProfit, actualRoi });
+    console.log(`[Settlement] Demo #${trade.id}: ${trade.event} | P&L: $${actualProfit.toFixed(4)} (${actualRoi.toFixed(2)}%)`);
   }
 
-  return closed;
+  const realOpen = db.getUnsettledRealTrades();
+  for (const trade of realOpen) {
+    const match = scores.find(s =>
+      s.event === trade.event ||
+      (s.home === trade.home && s.away === trade.away)
+    );
+    if (!match) continue;
+
+    const stake = trade.stake;
+    const isHomeWinner = match.winner === 'home';
+    const betOnHome = trade.side === 'home';
+    let actualProfit;
+    if ((isHomeWinner && betOnHome) || (!isHomeWinner && !betOnHome)) {
+      actualProfit = stake * trade.odds - stake;
+    } else {
+      actualProfit = -stake;
+    }
+    const actualRoi = stake > 0 ? (actualProfit / stake) * 100 : 0;
+
+    db.closeRealTrade(trade.id, actualProfit, actualRoi);
+    db.markSettlementChecked('real_trades', trade.id);
+    settled.real.push({ ...trade, actualProfit, actualRoi });
+    console.log(`[Settlement] Real #${trade.id}: ${trade.event} | P&L: $${actualProfit.toFixed(4)} (${actualRoi.toFixed(2)}%)`);
+  }
+
+  return settled;
 }
 
 async function performScan(ctx, sportFilter) {
@@ -99,11 +126,18 @@ async function performScan(ctx, sportFilter) {
   scanCount++;
 
   try {
-    const closedTrades = await closeCompletedDemoTrades();
-    if (closedTrades.length > 0 && !ctx) {
-      for (const t of closedTrades) {
+    const settled = await settleTrades();
+    if ((settled.demo.length > 0 || settled.real.length > 0) && !ctx) {
+      for (const t of settled.demo) {
         const emoji = t.actualProfit >= 0 ? '🟢' : '🔴';
-        const closeMsg = `${emoji} *Demo Trade CLOSED*\n\n📅 ${t.event}\n💰 P&L: $${t.actualProfit.toFixed(4)} (${t.actualRoi.toFixed(2)}%)\n⏱ Held ${Math.floor((Date.now() - new Date(t.opened_at).getTime()) / 60000)}m`;
+        const held = Math.floor((Date.now() - new Date(t.opened_at).getTime()) / 60000);
+        const closeMsg = `${emoji} *Demo Trade CLOSED*\n\n📅 ${t.event}\n💰 P&L: $${t.actualProfit.toFixed(4)} (${t.actualRoi.toFixed(2)}%)\n⏱ Held ${held}m`;
+        try { await bot.telegram.sendMessage(config.telegramChatId, closeMsg, { parse_mode: 'Markdown' }); } catch (_) {}
+      }
+      for (const t of settled.real) {
+        const emoji = t.actualProfit >= 0 ? '🟢' : '🔴';
+        const held = Math.floor((Date.now() - new Date(t.opened_at).getTime()) / 60000);
+        const closeMsg = `${emoji} *Real Trade CLOSED*\n\n📅 ${t.event}\n💰 P&L: $${t.actualProfit.toFixed(4)} (${t.actualRoi.toFixed(2)}%)\n⏱ Held ${held}m`;
         try { await bot.telegram.sendMessage(config.telegramChatId, closeMsg, { parse_mode: 'Markdown' }); } catch (_) {}
       }
     }
@@ -231,6 +265,29 @@ async function performScan(ctx, sportFilter) {
   } finally {
     isScanning = false;
   }
+}
+
+function startSettlementLoop() {
+  if (settlementTimer) clearInterval(settlementTimer);
+  const interval = config.liveMode ? 30000 : 60000;
+  settlementTimer = setInterval(async () => {
+    try {
+      const settled = await settleTrades();
+      if (settled.demo.length > 0 || settled.real.length > 0) {
+        console.log(`[Settlement] Cycle complete: ${settled.demo.length} demo + ${settled.real.length} real settled`);
+        if (config.alertsEnabled) {
+          for (const t of settled.demo) {
+            const emoji = t.actualProfit >= 0 ? '🟢' : '🔴';
+            const msg = `${emoji} *Demo Settled*\n📅 ${t.event}\n💰 $${t.actualProfit.toFixed(4)} (${t.actualRoi.toFixed(2)}%)`;
+            try { await bot.telegram.sendMessage(config.telegramChatId, msg, { parse_mode: 'Markdown' }); } catch (_) {}
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`[Settlement] Cycle error: ${err.message}`);
+    }
+  }, interval);
+  console.log(`[Settlement] Loop started (${interval / 1000}s interval)`);
 }
 
 // Chat ID authorization middleware
@@ -508,6 +565,8 @@ bot.command('status', async (ctx) => {
   const recentArbs = db.getRecentArbs(1);
   const bets = db.getRecentBets(1);
   const demoSummary = db.getDemoSummary();
+  const realSummary = db.getRealTradeSummary();
+  const settlement = db.getSettlementSummary();
 
   await ctx.reply(
     `📡 *Bot Status*\n\n` +
@@ -518,7 +577,9 @@ bot.command('status', async (ctx) => {
     `🔔 Alerts: ${config.alertsEnabled ? 'ON' : 'OFF'}\n` +
     `🔄 Auto-Scan: ${autoScanTimer ? 'RUNNING' : 'STOPPED'}\n` +
     `🎮 Demo Mode: ${config.demoMode ? 'ON' : 'OFF'}\n` +
-    `📊 Open: ${demoSummary.open_count || 0} | Closed: ${demoSummary.closed_count || 0} | P&L: $${(demoSummary.total_profit || 0).toFixed(2)}`,
+    `🔁 Settlement: ${settlementTimer ? 'RUNNING' : 'STOPPED'}\n` +
+    `📊 Demo: ${demoSummary.open_count || 0} open | ${demoSummary.closed_count || 0} settled | P&L: $${(demoSummary.total_profit || 0).toFixed(2)}\n` +
+    `📊 Real: ${realSummary.open_count || 0} open | ${realSummary.closed_count || 0} settled | P&L: $${(realSummary.total_profit || 0).toFixed(2)}`,
     { parse_mode: 'Markdown' }
   );
 });
@@ -529,8 +590,11 @@ bot.command('demo', async (ctx) => {
 
   if (sub === 'on') {
     config.demoMode = true;
+    config.demoExecutionRate = 1.0;
     db.saveSetting('demo_mode', 'true');
-    await ctx.reply('🟢 Demo mode enabled. Arbs will be auto-executed as demo trades.');
+    db.saveSetting('demo_execution_rate', '1');
+    startSettlementLoop();
+    await ctx.reply('🟢 Demo mode enabled (100% execution rate). Arbs simulated with real slippage, gas, and settlement.');
     return;
   }
   if (sub === 'off') {
@@ -558,15 +622,16 @@ bot.command('demo', async (ctx) => {
     `Execution Rate: ${(config.demoExecutionRate * 100).toFixed(0)}%\n` +
     `Bankroll: $${config.bankroll.toFixed(2)}\n` +
     `Open Trades: ${summary.open_count || 0} (est. $${(summary.expected_pnl || 0).toFixed(2)})\n` +
-    `Closed Trades: ${summary.closed_count || 0}\n` +
+    `Settled Trades: ${summary.closed_count || 0}\n` +
     `Total P&L: $${(summary.total_profit || 0).toFixed(2)}\n` +
     `Avg ROI: ${(summary.avg_roi || 0).toFixed(2)}%\n` +
     `Today: ${summary.today_trades || 0} trades | $${(summary.today_profit || 0).toFixed(2)}\n\n` +
+    `*Settlement:* ${settlementTimer ? '🟢 RUNNING' : '🔴 STOPPED'}\n\n` +
     `*Commands:*\n` +
-    `• /demo on/off — Toggle\n` +
+    `• /demo on/off — Toggle (on = 100% execution)\n` +
     `• /demo rate 0.3 — Set execution rate\n` +
     `• /positions — View open trades\n` +
-    `• /trades — View closed trades`;
+    `• /trades — View settled trades`;
 
   await ctx.reply(msg, { parse_mode: 'Markdown' });
 });
@@ -578,7 +643,7 @@ bot.command('trades', async (ctx) => {
     return;
   }
 
-  let msg = `📋 *Last 10 Closed Trades*\n\n`;
+  let msg = `📋 *Last 10 Settled Trades*\n\n`;
   trades.forEach((t, i) => {
     const emoji = t.profit >= 0 ? '🟢' : '🔴';
     const held = t.closed_at ? Math.floor((new Date(t.closed_at) - new Date(t.opened_at)) / 60000) : '?';
@@ -620,6 +685,7 @@ bot.command('live', async (ctx) => {
     config.liveMode = true;
     db.saveSetting('live_mode', 'true');
     await exchange.init();
+    startSettlementLoop();
     await ctx.reply('🚀 Live mode enabled. Arbs will be executed on-chain.');
     return;
   }
@@ -648,7 +714,7 @@ bot.command('live', async (ctx) => {
     `*Gas / Funds:*\n${gasMsg || 'No exchanges initialized'}\n\n` +
     `*Real Trades:*\n` +
     `Open: ${realSummary.open_count || 0}\n` +
-    `Closed: ${realSummary.closed_count || 0}\n` +
+    `Settled: ${realSummary.closed_count || 0}\n` +
     `Total P&L: $${(realSummary.total_profit || 0).toFixed(2)}\n` +
     `Avg ROI: ${(realSummary.avg_roi || 0).toFixed(2)}%\n` +
     `Today: ${realSummary.today_trades || 0} trades | $${(realSummary.today_profit || 0).toFixed(2)}\n\n` +
@@ -735,6 +801,10 @@ async function startBot() {
   console.log(`Bankroll: $${config.bankroll}`);
   console.log(`Scan interval: ${config.scanInterval / 1000}s`);
   console.log(`Alerts: ${config.alertsEnabled ? 'ON' : 'OFF'}`);
+
+  if (config.demoMode || config.liveMode) {
+    startSettlementLoop();
+  }
 }
 
 async function main() {
@@ -753,6 +823,7 @@ module.exports = { startBot, bot };
 async function gracefulShutdown(signal) {
   console.log(`\n[Bot] Received ${signal}, shutting down gracefully...`);
   if (autoScanTimer) clearInterval(autoScanTimer);
+  if (settlementTimer) clearInterval(settlementTimer);
   try { server.close(); } catch (_) {}
   try { exchange.disconnectSXWebSocket(); } catch (_) {}
   try { db.close(); } catch (_) {}
