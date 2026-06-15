@@ -203,13 +203,13 @@ async function scanESPN() {
 
       const [coreSport, coreLeague] = sport.slug.split('/');
 
-      for (const event of events) {
+      const eventResults = await Promise.allSettled(events.map(async (event) => {
         const comp = event.competitions?.[0];
-        if (!comp) continue;
+        if (!comp) return [];
 
         const homeTeam = comp.competitors?.find(c => c.homeAway === 'home');
         const awayTeam = comp.competitors?.find(c => c.homeAway === 'away');
-        if (!homeTeam || !awayTeam) continue;
+        if (!homeTeam || !awayTeam) return [];
 
         const homeName = homeTeam.team?.displayName || homeTeam.team?.name || 'Home';
         const awayName = awayTeam.team?.displayName || awayTeam.team?.name || 'Away';
@@ -222,7 +222,7 @@ async function scanESPN() {
         if (coreRes.ok) {
           const coreData = await coreRes.json();
           const items = coreData.items || [];
-          let coreFound = false;
+          const parsed = [];
 
           for (const item of items) {
             const homeML = item.homeTeamOdds?.current?.moneyLine?.decimal;
@@ -230,7 +230,7 @@ async function scanESPN() {
             if (!homeML || !awayML) continue;
             if (homeML <= 1 || awayML <= 1) continue;
 
-            results.push({
+            parsed.push({
               event: eventName,
               sport: sport.name,
               home: homeName,
@@ -242,25 +242,24 @@ async function scanESPN() {
               source: 'espn',
               commenceTime: event.date,
             });
-            coreFound = true;
           }
 
-          if (coreFound) continue; // skip scoreboard fallback
+          if (parsed.length > 0) return parsed; // skip scoreboard fallback
         }
 
         // Fallback: scoreboard odds (American format)
         const odds = comp.odds?.[0];
-        if (!odds?.moneyline) continue;
+        if (!odds?.moneyline) return [];
 
         const homeMoneyline = odds.moneyline.home?.close?.odds;
         const awayMoneyline = odds.moneyline.away?.close?.odds;
-        if (!homeMoneyline || !awayMoneyline) continue;
+        if (!homeMoneyline || !awayMoneyline) return [];
 
         const homeDec = americanToDecimal(homeMoneyline);
         const awayDec = americanToDecimal(awayMoneyline);
-        if (homeDec <= 1 || awayDec <= 1) continue;
+        if (homeDec <= 1 || awayDec <= 1) return [];
 
-        results.push({
+        return [{
           event: eventName,
           sport: sport.name,
           home: homeName,
@@ -271,7 +270,11 @@ async function scanESPN() {
           oddsB: awayDec,
           source: 'espn',
           commenceTime: event.date,
-        });
+        }];
+      }));
+
+      for (const r of eventResults) {
+        if (r.status === 'fulfilled') results.push(...r.value);
       }
     } catch (err) {
       if (err.message?.includes('400') || err.message?.includes('404')) {
@@ -286,14 +289,19 @@ async function scanESPN() {
 }
 
 async function scanAll() {
-  const [espnOdds, polymarketOdds, sxbetOdds, azuroOdds] = await Promise.all([
+  const results = await Promise.allSettled([
     scanESPN(),
     scanPolymarket(),
     scanSXBet(),
     scanAzuro(),
   ]);
 
-  const combined = [...espnOdds, ...polymarketOdds, ...sxbetOdds, ...azuroOdds];
+  const combined = [];
+  for (const r of results) {
+    if (r.status === 'fulfilled') {
+      combined.push(...r.value);
+    }
+  }
   return liveFilter(combined);
 }
 
@@ -362,53 +370,47 @@ async function scanScores() {
   return _scanScoresESPN();
 }
 
-const AZURO_SUBGRAPH = 'https://api.thegraph.com/subgraphs/name/azuro-org/azuro-api-polygon';
+const AZURO_SUBGRAPH = 'https://thegraph.onchainfeed.org/subgraphs/name/azuro-protocol/azuro-api-polygon-v3';
 
 async function scanAzuro() {
   const results = [];
   try {
     const query = `
       query LiveConditions($first: Int) {
-        conditions(first: $first, where: { status_in: ["Pending", "Live"] }, orderBy: createdAt, orderDirection: desc) {
+        conditions(first: $first, where: { status: Created }, orderBy: createdBlockTimestamp, orderDirection: desc) {
           id
-          game
-          status
-          startsAt
+          title
+          internalStartsAt
           outcomes {
             id
-            name
-            odds
-          }
-          core {
-            sport
-            participants
+            title
+            currentOdds
           }
         }
       }
     `;
-    const resp = await fetch(AZURO_SUBGRAPH, {
+    const resp = await fetchWithTimeout(AZURO_SUBGRAPH, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, variables: { first: 100 } }),
+      body: JSON.stringify({ query, variables: { first: 50 } }),
     });
-    const { data } = await resp.json();
-    const conditions = data?.conditions || [];
+    const body = await resp.json();
+    const conditions = body?.data?.conditions || [];
     for (const c of conditions) {
       if (!c.outcomes || c.outcomes.length < 2) continue;
       const homeOutcome = c.outcomes[0];
       const awayOutcome = c.outcomes[1];
-      const homeOdds = parseInt(homeOutcome.odds) / 1e18;
-      const awayOdds = parseInt(awayOutcome.odds) / 1e18;
-      if (homeOdds <= 1 || awayOdds <= 1) continue;
+      const homeOdds = parseFloat(homeOutcome.currentOdds);
+      const awayOdds = parseFloat(awayOutcome.currentOdds);
+      if (!homeOdds || !awayOdds || homeOdds <= 1 || awayOdds <= 1) continue;
 
-      const participants = c.core?.participants || [];
-      const homeName = participants[0] || homeOutcome.name || 'Home';
-      const awayName = participants[1] || 'Away';
-      const eventName = c.game || `${homeName} vs ${awayName}`;
+      const homeName = homeOutcome.title || 'Home';
+      const awayName = awayOutcome.title || 'Away';
+      const eventName = c.title || `${homeName} vs ${awayName}`;
 
       results.push({
         event: eventName,
-        sport: c.core?.sport || 'Azuro',
+        sport: 'Azuro',
         home: homeName,
         away: awayName,
         platformA: 'Azuro',
@@ -417,10 +419,11 @@ async function scanAzuro() {
         oddsB: awayOdds,
         source: 'azuro',
         conditionId: c.id,
+        commenceTime: c.internalStartsAt ? new Date(parseInt(c.internalStartsAt) * 1000).toISOString() : null,
       });
     }
   } catch (err) {
-    if (!err.message?.includes('400') && !err.message?.includes('404')) {
+    if (!err.message?.includes('400') && !err.message?.includes('404') && !err.message?.includes('aborted')) {
       console.error(`[OddsFetcher] Azuro: ${err.message}`, err.stack?.split('\n')[1]);
     }
   }
