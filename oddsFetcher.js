@@ -347,9 +347,9 @@ const SHARPAPI_LEAGUES = [
   { key: 'NCAAB', name: 'NCAAB' },
   { key: 'EPL', name: 'EPL' },
   { key: 'LALIGA', name: 'La Liga' },
-  { key: 'SERIEA', name: 'Serie A' },
+  { key: 'SERIE_A', name: 'Serie A' },
   { key: 'BUNDESLIGA', name: 'Bundesliga' },
-  { key: 'LIGUE1', name: 'Ligue 1' },
+  { key: 'LIGUE_1', name: 'Ligue 1' },
   { key: 'MLS', name: 'MLS' },
   { key: 'UFC', name: 'MMA' },
 ];
@@ -396,7 +396,9 @@ async function scanSharpAPI() {
       }
 
       for (const [gk, group] of Object.entries(groups)) {
-        const [sportsbook, homeName, awayName] = gk.split('|');
+        const [rawSportsbook, homeName, awayName] = gk.split('|');
+        // Normalize sportsbook name to title case (ESPN uses "DraftKings", SharpAPI uses "draftkings")
+        const sportsbook = rawSportsbook.charAt(0).toUpperCase() + rawSportsbook.slice(1);
         const homeSel = group.find(s => s.selection === homeName);
         const awaySel = group.find(s => s.selection === awayName);
         if (!homeSel?.odds_decimal || !awaySel?.odds_decimal) continue;
