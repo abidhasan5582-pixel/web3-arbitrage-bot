@@ -118,6 +118,45 @@ function classifyRisk(roi) {
   return 'low';
 }
 
+function findInternalArbs(oddsList) {
+  const arbs = [];
+
+  for (const entry of oddsList) {
+    // Polymarket: YES vs NO within same market
+    if (entry.source === 'polymarket' && entry.oddsA && entry.oddsB) {
+      const result = calculate2Way(entry.oddsA, entry.oddsB);
+      if (result.isArb) {
+        const roi = Math.round(result.roi * 10000) / 100;
+        if (roi < config.minArbROI || roi > config.maxArbROI) continue;
+        arbs.push({
+          event: entry.event,
+          sport: 'Polymarket',
+          home: 'YES',
+          away: 'NO',
+          platformA: entry.platformA,
+          oddsA: entry.oddsA,
+          platformB: entry.platformB,
+          oddsB: entry.oddsB,
+          roi,
+          profit: result.profit,
+          stakeA: result.stakeA,
+          stakeB: result.stakeB,
+          riskLevel: classifyRisk(result.roi),
+          source: 'polymarket-internal',
+        });
+      }
+    }
+
+    // Azuro: same outcome across different cores (handled at scan time, caught here)
+    if (entry.source === 'azuro-internal') {
+      arbs.push(entry);
+    }
+  }
+
+  arbs.sort((a, b) => b.roi - a.roi);
+  return arbs;
+}
+
 function findArbitrages(oddsList, is3Way = false) {
   const arbs = [];
 
@@ -164,4 +203,4 @@ function calculateArb(oddsA, oddsB, bankrollOverride) {
   return result;
 }
 
-module.exports = { findArbitrages, calculate2Way, calculate3Way, calculateArb, classifyRisk };
+module.exports = { findArbitrages, calculate2Way, calculate3Way, calculateArb, classifyRisk, findInternalArbs };

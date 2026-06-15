@@ -180,17 +180,25 @@ async function performScan(ctx, sportFilter) {
     }
 
     const arbs = arbitrage.findArbitrages(oddsData);
+    const internalArbs = arbitrage.findInternalArbs(oddsData);
+    // Merge and deduplicate by event+platforms
+    const allArbs = [...arbs];
+    for (const ia of internalArbs) {
+      const dup = allArbs.find(a => a.event === ia.event && a.platformA === ia.platformA && a.platformB === ia.platformB);
+      if (!dup) allArbs.push(ia);
+    }
+    allArbs.sort((a, b) => b.roi - a.roi);
 
-    for (const arb of arbs) {
+    for (const arb of allArbs) {
       db.saveOpportunity(arb);
     }
 
     let executedCount = 0;
     let executionProfitTotal = 0;
     let openedTrades = [];
-    if ((config.demoMode || config.liveMode) && arbs.length > 0) {
+    if ((config.demoMode || config.liveMode) && allArbs.length > 0) {
       const bestPerEvent = {};
-      for (const arb of arbs) {
+      for (const arb of allArbs) {
         const assessed = risk.assessArbRisk(arb);
         if (!assessed.recommended) continue;
         const key = arb.event;
@@ -217,41 +225,41 @@ async function performScan(ctx, sportFilter) {
           trades: executedCount,
           wins: executionProfitTotal > 0 ? executedCount : 0,
           losses: executionProfitTotal <= 0 ? executedCount : 0,
-          bestRoi: Math.max(...arbs.map(a => a.roi)),
+          bestRoi: Math.max(...allArbs.map(a => a.roi)),
         });
       }
     }
 
     const today = new Date().toISOString().split('T')[0];
     db.updateDailyStats(today, {
-      arbsFound: arbs.length,
+      arbsFound: allArbs.length,
       arbsExecuted: executedCount,
-      bestRoi: arbs.length > 0 ? Math.max(...arbs.map(a => a.roi)) : 0,
+      bestRoi: allArbs.length > 0 ? Math.max(...allArbs.map(a => a.roi)) : 0,
     });
 
     if (ctx) {
       const liveInfo = liveGameCount > 0 ? ` 🔴 ${liveGameCount} live games` : '';
-      if (arbs.length === 0) {
+      if (allArbs.length === 0) {
         await ctx.reply(`✅ Scan complete. No arbitrage opportunities found this round.${liveInfo}`);
       } else {
         if (executedCount > 0) {
           const mode = config.liveMode ? '🚀 *Live' : '🎮 *Demo';
           await ctx.reply(`${mode}: ${executedCount} trades executed!*\nEstimated P&L: $${executionProfitTotal.toFixed(2)}`, { parse_mode: 'Markdown' });
         }
-        let msg = `🎯 *Found ${arbs.length} arbitrage opportunities!*\n\n`;
-        const topArbs = arbs.slice(0, 5);
+        let msg = `🎯 *Found ${allArbs.length} arbitrage opportunities!*\n\n`;
+        const topArbs = allArbs.slice(0, 5);
         topArbs.forEach((arb, i) => {
           msg += formatArbMessage(arb, i + 1) + '\n';
         });
-        if (arbs.length > 5) {
-          msg += `...and ${arbs.length - 5} more. Use /arbs to see all.`;
+        if (allArbs.length > 5) {
+          msg += `...and ${allArbs.length - 5} more. Use /arbs to see all.`;
         }
         await ctx.reply(truncateMsg(msg), { parse_mode: 'Markdown' });
       }
     }
 
-    if (config.alertsEnabled && arbs.length > 0 && !ctx) {
-      const topArb = arbs[0];
+    if (config.alertsEnabled && allArbs.length > 0 && !ctx) {
+      const topArb = allArbs[0];
       const alertMsg = `🚨 *ARB ALERT!*\n\n` +
         `${topArb.event}\n` +
         `${topArb.platformA}: ${topArb.oddsA} | ${topArb.platformB}: ${topArb.oddsB}\n` +
@@ -277,7 +285,7 @@ async function performScan(ctx, sportFilter) {
       }
     }
 
-    return arbs;
+    return allArbs;
   } catch (err) {
     console.error('Scan error:', err.message, err.stack?.split('\n').slice(0, 3).join('\n'));
     if (ctx) await ctx.reply(`❌ Scan error: ${err.message}`);
@@ -789,6 +797,7 @@ async function startBot() {
   console.log('PORT:', process.env.PORT || '3000');
   console.log('Chat ID configured:', config.telegramChatId ? 'YES' : 'NO');
   console.log('Odds API:', config.oddsApiKey ? 'SET' : 'MISSING');
+  console.log('ParlayAPI:', process.env.PARLAYAPI_API_KEY ? 'SET' : 'MISSING');
   console.log('Bankroll: $' + config.bankroll);
 
   // Always start health server first (for Railway)

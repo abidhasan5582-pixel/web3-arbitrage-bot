@@ -1,4 +1,5 @@
 const config = require('./config');
+const { calculate2Way } = require('./arbitrage');
 
 const ESPN_SPORTS = [
   { slug: 'baseball/mlb', name: 'MLB' },
@@ -120,7 +121,7 @@ async function scanSXBet() {
       const gameTime = market.gameTime ? new Date(market.gameTime * 1000).toISOString() : null;
 
       results.push({
-        event: `${homeTeam} vs ${awayTeam}`,
+        event: normalizeEventName(awayTeam, homeTeam),
         sport: market.sportLabel || 'SX Bet',
         home: homeTeam,
         away: awayTeam,
@@ -179,6 +180,7 @@ async function scanESPN() {
         const homeName = homeTeam.team?.displayName || homeTeam.team?.name || 'Home';
         const awayName = awayTeam.team?.displayName || awayTeam.team?.name || 'Away';
         const eventName = event.name || `${awayName} at ${homeName}`;
+        const normEvent = normalizeEventName(awayName, homeName);
 
         // Primary: Core API — returns decimal odds with provider names
         const coreUrl = `https://sports.core.api.espn.com/v2/sports/${coreSport}/leagues/${coreLeague}/events/${event.id}/competitions/${comp.id}/odds`;
@@ -196,7 +198,7 @@ async function scanESPN() {
             if (homeML <= 1 || awayML <= 1) continue;
 
             parsed.push({
-              event: eventName,
+              event: normEvent,
               sport: sport.name,
               home: homeName,
               away: awayName,
@@ -225,7 +227,7 @@ async function scanESPN() {
         if (homeDec <= 1 || awayDec <= 1) return [];
 
         return [{
-          event: eventName,
+          event: normEvent,
           sport: sport.name,
           home: homeName,
           away: awayName,
@@ -253,16 +255,97 @@ async function scanESPN() {
   return results;
 }
 
+// Odds API keys and sport-to-slug mapping
+const ODDS_API_BASE = 'https://api.the-odds-api.com/v4';
+const ODDS_API_SPORTS = [
+  { key: 'basketball_nba', name: 'NBA' },
+  { key: 'americanfootball_nfl', name: 'NFL' },
+  { key: 'baseball_mlb', name: 'MLB' },
+  { key: 'icehockey_nhl', name: 'NHL' },
+  { key: 'americanfootball_ncaaf', name: 'NCAAF' },
+  { key: 'basketball_ncaab', name: 'NCAAB' },
+  { key: 'soccer_epl', name: 'EPL' },
+  { key: 'soccer_esp_la_liga', name: 'La Liga' },
+  { key: 'soccer_italy_serie_a', name: 'Serie A' },
+  { key: 'soccer_germany_bundesliga', name: 'Bundesliga' },
+  { key: 'soccer_france_ligue_one', name: 'Ligue 1' },
+  { key: 'mma_mixed_martial_arts', name: 'MMA' },
+  { key: 'boxing_boxing', name: 'Boxing' },
+];
+
+async function scanOddsAPI() {
+  const results = [];
+  // Try ParlayAPI first if configured, then fallback to The Odds API
+  const parlayKey = process.env.PARLAYAPI_API_KEY || '';
+  const oddsKey = config.oddsApiKey;
+  const apiKey = parlayKey || oddsKey;
+  if (!apiKey) return results;
+  const baseUrl = parlayKey ? 'https://api.parlayapi.com/v1' : ODDS_API_BASE;
+
+  for (const sport of ODDS_API_SPORTS) {
+    try {
+      const url = `${baseUrl}/sports/${sport.key}/odds/?regions=us&markets=h2h&apiKey=${apiKey}`;
+      const res = await fetchWithTimeout(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+      if (!res.ok) {
+        if (res.status === 401 || res.status === 403) {
+          console.log(`[OddsAPI] ${sport.name}: invalid API key — skipping`);
+          return results;
+        }
+        continue;
+      }
+      const data = await res.json();
+      if (!Array.isArray(data)) continue;
+
+      for (const event of data) {
+        const homeName = event.home_team || 'Home';
+        const awayName = event.away_team || 'Away';
+        const normEvent = normalizeEventName(awayName, homeName);
+
+        for (const bookmaker of (event.bookmakers || [])) {
+          const platform = bookmaker.title || bookmaker.key || 'Unknown';
+          for (const market of (bookmaker.markets || [])) {
+            if (market.key !== 'h2h') continue;
+            const outcomes = market.outcomes || [];
+            const homeOutcome = outcomes.find(o => o.name === event.home_team);
+            const awayOutcome = outcomes.find(o => o.name === event.away_team);
+            if (!homeOutcome?.price || !awayOutcome?.price) continue;
+
+            results.push({
+              event: normEvent,
+              sport: sport.name,
+              home: homeName,
+              away: awayName,
+              platformA: platform,
+              oddsA: homeOutcome.price,
+              platformB: platform,
+              oddsB: awayOutcome.price,
+              source: 'oddsapi',
+              commenceTime: event.commence_time || null,
+            });
+          }
+        }
+      }
+    } catch (err) {
+      if (!err.message?.includes('aborted')) {
+        console.error(`[OddsAPI] ${sport.name}: ${err.message}`);
+      }
+    }
+  }
+  return results;
+}
+
 async function scanAll() {
-  const results = await Promise.allSettled([
+  const sources = [
     scanESPN(),
     scanPolymarket(),
     scanSXBet(),
     scanAzuro(),
-  ]);
+    scanOddsAPI(),
+  ];
+  const results = await Promise.allSettled(sources);
 
   const combined = [];
-  const sourceLabels = ['ESPN', 'Polymarket', 'SX Bet', 'Azuro'];
+  const sourceLabels = ['ESPN', 'Polymarket', 'SX Bet', 'Azuro', 'OddsAPI'];
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
     if (r.status === 'fulfilled') {
@@ -351,7 +434,11 @@ async function scanAzuro() {
         conditions(first: $first, where: { status: Created }, orderBy: createdBlockTimestamp, orderDirection: desc) {
           id
           title
+          core
           internalStartsAt
+          game {
+            id
+          }
           outcomes {
             id
             title
@@ -363,10 +450,12 @@ async function scanAzuro() {
     const resp = await fetchWithTimeout(AZURO_SUBGRAPH, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, variables: { first: 50 } }),
+      body: JSON.stringify({ query, variables: { first: 100 } }),
     });
     const body = await resp.json();
     const conditions = body?.data?.conditions || [];
+
+    // First pass: return individual conditions as normal entries
     for (const c of conditions) {
       if (!c.outcomes || c.outcomes.length < 2) continue;
       const homeOutcome = c.outcomes[0];
@@ -377,7 +466,7 @@ async function scanAzuro() {
 
       const homeName = homeOutcome.title || 'Home';
       const awayName = awayOutcome.title || 'Away';
-      const eventName = c.title || `${homeName} vs ${awayName}`;
+      const eventName = normalizeEventName(awayName, homeName);
 
       results.push({
         event: eventName,
@@ -393,12 +482,76 @@ async function scanAzuro() {
         commenceTime: c.internalStartsAt ? new Date(parseInt(c.internalStartsAt) * 1000).toISOString() : null,
       });
     }
+
+    // Second pass: detect internal arbs across different cores for the same game
+    const byGame = {};
+    for (const c of conditions) {
+      if (!c.outcomes || c.outcomes.length < 2) continue;
+      if (!c.game?.id) continue;
+      if (!c.core) continue;
+      if (!byGame[c.game.id]) byGame[c.game.id] = [];
+      // Normalize outcome titles for matching
+      const outcomes = c.outcomes.map(o => ({ title: o.title?.trim().toLowerCase(), odds: parseFloat(o.currentOdds), raw: o.title }));
+      byGame[c.game.id].push({ core: c.core, outcomes, title: c.title });
+    }
+
+    for (const gameId of Object.keys(byGame)) {
+      const conditions = byGame[gameId];
+      if (conditions.length < 2) continue;
+
+      // Compare each pair of conditions from different cores
+      for (let i = 0; i < conditions.length; i++) {
+        for (let j = i + 1; j < conditions.length; j++) {
+          const a = conditions[i];
+          const b = conditions[j];
+          if (a.core === b.core) continue;
+
+          // Match outcomes by title (same-named outcomes across cores)
+          for (const oa of a.outcomes) {
+            const ob = b.outcomes.find(o => o.title === oa.title);
+            if (!ob) continue;
+            // Found same outcome on different cores with different odds
+            const lower = Math.min(oa.odds, ob.odds);
+            const higher = Math.max(oa.odds, ob.odds);
+            if (lower <= 1 || higher <= 1) continue;
+            // Calculate arb: back the higher odds, lay the lower
+            const calc = calculate2Way(higher, lower);
+            if (calc.isArb) {
+              const roi = Math.round(calc.roi * 10000) / 100;
+              // Only emit if odds truly differ by at least 0.5% to avoid noise
+              if (Math.abs(higher - lower) / lower < 0.005) continue;
+              const highCore = oa.odds === higher ? a.core : b.core;
+              const lowCore = oa.odds === lower ? a.core : b.core;
+              results.push({
+                event: conditions[0].title || gameId,
+                sport: 'Azuro',
+                home: oa.raw || oa.title,
+                away: ob.raw || ob.title,
+                platformA: `Azuro:${highCore.slice(0, 10)}`,
+                oddsA: higher,
+                platformB: `Azuro:${lowCore.slice(0, 10)}`,
+                oddsB: lower,
+                roi,
+                source: 'azuro-internal',
+                commenceTime: null,
+              });
+            }
+          }
+        }
+      }
+    }
   } catch (err) {
     if (!err.message?.includes('400') && !err.message?.includes('404') && !err.message?.includes('aborted')) {
       console.error(`[OddsFetcher] Azuro: ${err.message}`, err.stack?.split('\n')[1]);
     }
   }
   return results;
+}
+
+function normalizeEventName(awayName, homeName) {
+  const away = awayName.trim().replace(/\s+/g, ' ');
+  const home = homeName.trim().replace(/\s+/g, ' ');
+  return `${away} @ ${home}`;
 }
 
 function liveFilter(oddsData) {
@@ -412,4 +565,4 @@ function liveFilter(oddsData) {
   });
 }
 
-module.exports = { scanAll, scanPolymarket, scanSXBet, scanESPN, scanAzuro, liveFilter, scanScores, countLiveGames };
+module.exports = { scanAll, scanPolymarket, scanSXBet, scanESPN, scanAzuro, scanOddsAPI, liveFilter, scanScores, countLiveGames, normalizeEventName };
