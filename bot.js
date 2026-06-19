@@ -983,6 +983,11 @@ async function startBot() {
     startSettlementLoop();
   }
 
+  // Start auto-scan on boot
+  autoScanEnabled = true;
+  scheduleNextScan();
+  console.log(`[Bot] Auto-scan started (interval: ${config.scanInterval / 1000}s)`);
+
   // Initial scan on startup (runs async, no reply needed)
   setTimeout(() => {
     console.log('[Bot] Running initial scan...');

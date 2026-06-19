@@ -293,6 +293,49 @@ if (config.oddsapiiSports) {
 }
 const ODDSAPIIO_BOOKMAKERS = config.oddsapiiBookmakers || 'DraftKings,FanDuel';
 
+// --- Odds-API.io Rate Limiter (sliding window) ---
+const _rl = {
+  calls: [],
+  maxCalls: 85,
+  windowMs: 3600000,
+  limited: false,
+  limitedAt: 0,
+};
+function _prune() {
+  const now = Date.now();
+  _rl.calls = _rl.calls.filter(t => now - t < _rl.windowMs);
+  if (_rl.limited && now - _rl.limitedAt > _rl.windowMs) _rl.limited = false;
+}
+function _canCall() { _prune(); return !_rl.limited && _rl.calls.length < _rl.maxCalls; }
+function _record() { _rl.calls.push(Date.now()); }
+function _budget() { _prune(); return _rl.maxCalls - _rl.calls.length; }
+function _hitLimit() { _rl.limited = true; _rl.limitedAt = Date.now(); console.log('[OddsAPI] Rate limited — pausing 1h'); }
+
+// --- TTL Cache ---
+const _cache = new Map();
+async function _withCache(key, ttlMs, fn) {
+  const now = Date.now();
+  const hit = _cache.get(key);
+  if (hit && now - hit.ts < ttlMs) return hit.data;
+  if (!_canCall()) {
+    if (hit) return hit.data;
+    return null;
+  }
+  _record();
+  try {
+    const data = await fn();
+    _cache.set(key, { data, ts: now });
+    return data;
+  } catch (err) {
+    if (err.name === 'RateLimitExceededError') _hitLimit();
+    throw err;
+  }
+}
+
+// --- Sport rotation (3 per scan) ---
+let _sportPtr = 0;
+const _SPORTS_PER_SCAN = 3;
+
 let _oddsApiClient = null;
 function getOddsAPIClient() {
   if (!_oddsApiClient && config.oddsapiiApiKey) {
@@ -306,33 +349,59 @@ async function scanOddsAPIio() {
   const client = getOddsAPIClient();
   if (!client) return results;
 
+  if (!_canCall()) {
+    console.log(`[OddsAPI.io] Rate limited (budget: ${_budget()}/${_rl.maxCalls}), skipping`);
+    return results;
+  }
+
+  // 1. Live events (always try first — highest value)
   try {
-    const liveData = await client.getLiveEvents();
+    const liveData = await _withCache('live_events', 30000, () => client.getLiveEvents());
     if (Array.isArray(liveData) && liveData.length > 0) {
       const liveIds = liveData.map(e => e.id).filter(Boolean);
-      console.log(`[OddsAPI.io] ${liveIds.length} live events found`);
-      for (let i = 0; i < liveIds.length; i += 10) {
+      console.log(`[OddsAPI.io] ${liveIds.length} live events`);
+      for (let i = 0; i < liveIds.length && _canCall(); i += 10) {
         const batch = liveIds.slice(i, i + 10);
-        await _parseOddsBatch(await client.getOddsForMultipleEvents({ eventIds: batch.join(','), bookmakers: ODDSAPIIO_BOOKMAKERS }), true, results);
+        const odds = await _withCache(`odds_multi:${batch.join(',')}`, 60000,
+          () => client.getOddsForMultipleEvents({ eventIds: batch.join(','), bookmakers: ODDSAPIIO_BOOKMAKERS })
+        );
+        if (odds) await _parseOddsBatch(odds, true, results);
       }
     }
   } catch (err) {
-    if (!err.message?.includes('aborted') && !err.message?.includes('HTTP 401')) console.error(`[OddsAPI.io] live: ${err.message}`);
-  }
-
-  for (const sport of ODDSAPIIO_SPORTS) {
-    try {
-      const events = await client.getEvents({ sport: sport.slug, status: 'pending', limit: 50 });
-      if (!Array.isArray(events) || events.length === 0) continue;
-      const ids = events.map(e => e.id).filter(Boolean);
-      for (let i = 0; i < ids.length; i += 10) {
-        const batch = ids.slice(i, i + 10);
-        await _parseOddsBatch(await client.getOddsForMultipleEvents({ eventIds: batch.join(','), bookmakers: ODDSAPIIO_BOOKMAKERS }), false, results);
-      }
-    } catch (err) {
-      if (!err.message?.includes('aborted')) console.error(`[OddsAPI.io] ${sport.name}: ${err.message}`);
+    if (err.name !== 'RateLimitExceededError' && !err.message?.includes('aborted')) {
+      console.error(`[OddsAPI.io] live: ${err.message}`);
     }
   }
+
+  // 2. Pending events — rotate through sports (3 per scan)
+  const budget = _budget();
+  const count = budget > 30 ? _SPORTS_PER_SCAN : budget > 10 ? 2 : 1;
+  for (let i = 0; i < count && i < ODDSAPIIO_SPORTS.length; i++) {
+    const sport = ODDSAPIIO_SPORTS[(_sportPtr + i) % ODDSAPIIO_SPORTS.length];
+    if (!_canCall()) break;
+    try {
+      const events = await _withCache(`events:${sport.slug}:pending`, 120000,
+        () => client.getEvents({ sport: sport.slug, status: 'pending', limit: 50 })
+      );
+      if (!Array.isArray(events) || events.length === 0) continue;
+      const ids = events.map(e => e.id).filter(Boolean);
+      for (let j = 0; j < ids.length && _canCall(); j += 10) {
+        const batch = ids.slice(j, j + 10);
+        const odds = await _withCache(`odds_multi:${batch.join(',')}`, 60000,
+          () => client.getOddsForMultipleEvents({ eventIds: batch.join(','), bookmakers: ODDSAPIIO_BOOKMAKERS })
+        );
+        if (odds) await _parseOddsBatch(odds, false, results);
+      }
+    } catch (err) {
+      if (err.name !== 'RateLimitExceededError' && !err.message?.includes('aborted')) {
+        console.error(`[OddsAPI.io] ${sport.name}: ${err.message}`);
+      }
+    }
+  }
+  _sportPtr = (_sportPtr + count) % ODDSAPIIO_SPORTS.length;
+
+  console.log(`[OddsAPI.io] ${results.length} events (budget: ${_budget()}/${_rl.maxCalls})`);
   return results;
 }
 
@@ -469,8 +538,12 @@ async function scanArbitrageBets() {
   const client = getOddsAPIClient();
   if (!client) return results;
 
+  if (!_canCall()) return results;
+
   try {
-    const data = await client.getArbitrageBets({ bookmakers: ODDSAPIIO_BOOKMAKERS, limit: 100, includeEventDetails: true });
+    const data = await _withCache('arbitrage_bets', 60000,
+      () => client.getArbitrageBets({ bookmakers: ODDSAPIIO_BOOKMAKERS, limit: 100, includeEventDetails: true })
+    );
     if (!Array.isArray(data)) return results;
 
     for (const arb of data) {
@@ -507,7 +580,7 @@ async function scanArbitrageBets() {
       console.log(`[ArbitrageBets] ${results.length} arb opportunities found`);
     }
   } catch (err) {
-    if (!err.message?.includes('aborted') && !err.message?.includes('HTTP 401')) {
+    if (err.name !== 'RateLimitExceededError' && !err.message?.includes('aborted') && !err.message?.includes('HTTP 401')) {
       console.log(`[ArbitrageBets] ${err.message}`);
     }
   }
