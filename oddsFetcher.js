@@ -558,7 +558,10 @@ async function scanArbitrageBets() {
       const awayOdds = parseFloat(awayLeg.odds);
       if (!homeOdds || !awayOdds || homeOdds <= 1 || awayOdds <= 1) continue;
 
-      const roi = arb.profitMargin != null ? arb.profitMargin / 100 : null;
+      const calc = calculate2Way(homeOdds, awayOdds);
+      if (!calc.isArb) continue;
+      const roi = Math.round(calc.roi * 10000) / 100;
+      if (roi < config.minArbROI || roi > config.maxArbROI) continue;
 
       results.push({
         event: normalizeEventName(arb.event.away, arb.event.home),
@@ -569,6 +572,9 @@ async function scanArbitrageBets() {
         oddsA: homeOdds,
         platformB: awayLeg.bookmaker,
         oddsB: awayOdds,
+        stakeA: calc.stakeA,
+        stakeB: calc.stakeB,
+        profit: calc.profit,
         source: 'oddsapii-arb',
         isLive: false,
         commenceTime: arb.event.date || null,
